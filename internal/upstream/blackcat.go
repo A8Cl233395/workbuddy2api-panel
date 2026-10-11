@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -94,28 +95,49 @@ func (c *Client) ClaimCompensation(a *auth.Auth) (int64, error) {
 	return resp.Credit, nil
 }
 
-// HeatmapYesterdayMissed 检查昨日是否漏签（heatmap cell score==0）。
-func (c *Client) HeatmapYesterdayMissed(a *auth.Auth) (bool, error) {
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+// HeatmapBrokenDates 返回本月（今天所在月的 1 号起）到今天（不含）之间
+// score==0 的日期，升序。
+//
+// 下界只能取月首，不能更宽：score==0 同时表示「那天漏签」和「那天账号还不存在」
+// （探针实测：注册前的日子也是 0 分，heatmap 的 range 是近 365 天），只有上游能
+// 区分两者——所以这里只做时间窗收窄，交给 UseMakeupCard 的拒绝兜底。
+// 今天不算：当天未结束，0 分不代表漏签。today.date 由响应给出，不读宿主机时钟
+// （宿主机若为 UTC，本地 08:00 前会算错天）。
+func (c *Client) HeatmapBrokenDates(a *auth.Auth) ([]string, error) {
 	data, err := c.growthJSON(a, http.MethodGet, "/activity/growth/heatmap", nil)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	var resp struct {
+		Today struct {
+			Date string `json:"date"`
+		} `json:"today"`
 		Cells []struct {
 			Date  string `json:"date"`
 			Score int    `json:"score"`
 		} `json:"cells"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return false, err
+		return nil, err
 	}
+	if len(resp.Today.Date) < 10 {
+		return nil, fmt.Errorf("heatmap 缺 today.date（结构未知，不敢猜窗口）")
+	}
+	today := resp.Today.Date[:10]
+	monthStart := today[:8] + "01"
+	var out []string
 	for _, cell := range resp.Cells {
-		if len(cell.Date) >= 10 && cell.Date[:10] == yesterday {
-			return cell.Score == 0, nil
+		d := cell.Date
+		if len(d) < 10 {
+			continue
+		}
+		d = d[:10]
+		if cell.Score == 0 && d >= monthStart && d < today {
+			out = append(out, d)
 		}
 	}
-	return false, nil
+	sort.Strings(out) // 上游是否保证升序未验证
+	return out, nil
 }
 
 // UseMakeupCard 对指定日期使用补签卡（保住连登连续天数；无卡返回业务错误）。

@@ -9,7 +9,6 @@ package scheduler
 import (
 	"encoding/json"
 	"log"
-	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -38,8 +37,8 @@ func (s *Scheduler) RunStreakBonusNow() {
 
 // streakBonusAccount 单账号：补签保连登 → 礼包/补偿 → 兑换所有已解锁档位 → 抽完所有 chances。
 func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
-	// 0. 补签保连登：昨日漏签且有补签卡则补上（连续天数一断就要重攒 7 天）。
-	s.makeupYesterday(a)
+	// 0. 补签保连登：本月漏签且有补签卡则从最近一天往回补（连续天数一断就要重攒 7 天）。
+	s.makeupMissed(a)
 	// 0.5 礼包/补偿（每号一次，无则业务错误静默跳过）。
 	if credit, err := s.cfg.Upstream.ClaimGift(a); err == nil {
 		log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", logfmt.Label(a.UID, a.Nickname), credit)
@@ -99,21 +98,25 @@ func compactJSON(raw json.RawMessage) string {
 	return s
 }
 
-// makeupYesterday 昨日漏签且有补签卡时自动补签（保住连登连续天数）。
+// makeupMissed 本月漏签且有补签卡时自动补签（保住连登连续天数）。
+// 从最近一天往回补（最近的最值钱），最多补到卡用光。
+// 上游拒绝即停：注册前的日子同样是 0 分，无法与漏签区分，只能由拒绝兜底。
 // 无卡 / 无漏签 / 查询失败均静默（不影响主流程）。
-func (s *Scheduler) makeupYesterday(a *auth.Auth) {
-	missed, err := s.cfg.Upstream.HeatmapYesterdayMissed(a)
-	if err != nil || !missed {
+func (s *Scheduler) makeupMissed(a *auth.Auth) {
+	broken, err := s.cfg.Upstream.HeatmapBrokenDates(a)
+	if err != nil || len(broken) == 0 {
 		return
 	}
 	full, err := s.cfg.Upstream.GrowthStreakFull(a)
 	if err != nil || full.MakeupCards.Balance <= 0 {
 		return
 	}
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	if err := s.cfg.Upstream.UseMakeupCard(a, yesterday); err != nil {
-		log.Printf("streak-bonus %s: 补签 %s 失败: %v", logfmt.Label(a.UID, a.Nickname), yesterday, err)
-		return
+	for i, n := 0, min(full.MakeupCards.Balance, len(broken)); i < n; i++ {
+		d := broken[len(broken)-1-i]
+		if err := s.cfg.Upstream.UseMakeupCard(a, d); err != nil {
+			log.Printf("streak-bonus %s: 补签 %s 失败: %v", logfmt.Label(a.UID, a.Nickname), d, err)
+			return
+		}
+		log.Printf("streak-bonus %s: ★ 已用补签卡补签 %s（保连登）", logfmt.Label(a.UID, a.Nickname), d)
 	}
-	log.Printf("streak-bonus %s: ★ 已用补签卡补签 %s（保连登）", logfmt.Label(a.UID, a.Nickname), yesterday)
 }
