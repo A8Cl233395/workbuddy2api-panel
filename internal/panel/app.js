@@ -518,6 +518,8 @@ async function loadOverview(quiet) {
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || []);
     renderModelLocks(d.model_locks);
+    // 到期提醒随首页统计一起刷新：只用响应里已有的最早到期快照，零上游请求。
+    renderExpirySnapshot(d);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 
@@ -2766,6 +2768,37 @@ if ($('pkDetail')) $('pkDetail').addEventListener('click', ev => {
       : '收起已用完 ' + count + ' 个包';
   }
 });
+
+/* 到期提醒快照（零上游请求）：吃 /overview 里已有的 credits_earliest_expiry /
+   credits_earliest_remaining —— 由签到与余额后台刷新写进 state.json，随首页统计
+   一起到。此前账号池页对「谁快到期」一个字都不显示，要看得切进「积分构成」页打
+   一轮逐账号实时查询（本部署 20 个号约 2.7s）。
+   快照只有**最早一批**，完整批次仍看那一页；剩余天数口径与 pkExpiryText 一致
+   （ceil 到天），否则同一条批次两页会各说一个数。 */
+function renderExpirySnapshot(d) {
+  const rows = [];
+  for (const a of (d && d.accounts) || []) {
+    const remain = Number(a.credits_earliest_remaining || 0);
+    const ms = a.credits_earliest_expiry ? new Date(a.credits_earliest_expiry).getTime() : NaN;
+    if (!Number.isFinite(ms) || remain <= 0) continue;  // 无未来批次（长期包/已清空）不入表
+    rows.push({ a, ms, remain });
+  }
+  rows.sort((x, y) => x.ms - y.ms);
+  $('expBody').innerHTML = rows.length ? rows.map(({ a, ms, remain }) => {
+    const days = Math.max(0, Math.ceil((ms - Date.now()) / PK_DAY_MS));
+    const color = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
+    return '<tr>' +
+      '<td>' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</td>' +
+      '<td>' + esc(pkExpiryDateTime(ms).slice(0, 10)) + '</td>' +
+      '<td class="num" style="color:' + color + '">' + (days === 0 ? '今天' : days + ' 天') + '</td>' +
+      '<td class="num">' + fmtTok(remain) + '</td>' +
+      '<td class="num">' + fmtTok(Math.ceil(remain / Math.max(1, days))) + '</td>' +
+      '</tr>';
+  }).join('') : '<tr><td colspan="5">暂无未来到期批次</td></tr>';
+  $('expNote').textContent = rows.length
+    ? rows.length + ' 个账号有未到期批次 · 只列最早一批，全部批次见「积分构成」'
+    : '暂无未来到期批次';
+}
 
 // 按需拉取（移植上游 8391a05）：packages 是**逐账号实时查上游**，切进本视图就打一次，
 // 账号一多既慢又压上游。有缓存先直接渲染（标注数据年龄），只有首次进入或显式刷新生效。

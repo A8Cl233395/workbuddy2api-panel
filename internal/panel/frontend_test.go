@@ -1385,3 +1385,63 @@ vm.runInContext(src.slice(start) + '\nthis.loadPackages = loadPackages;', ctx);
 		t.Fatalf("packages 按需拉取行为不符:\n got=%s\nwant=%s", out, want)
 	}
 }
+
+// 账号池页的到期提醒快照：只吃 /overview 已有的最早到期字段，不发任何上游请求。
+// 钉三件事：按到期升序（最近的排最前）、无未来批次的账号不进表、剩余天数口径与
+// pkExpiryText 一致（ceil 到天）——否则同一条批次在「积分构成」页与账号池页会各说一个数。
+func TestAppJSExpirySnapshot(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry snapshot test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function renderExpirySnapshot');
+const end = src.indexOf('let lastPackages');
+if (start < 0 || end < 0 || end < start) throw new Error('expiry snapshot region not found');
+const els = {};
+const ctx = {
+  Date, Math, Number, String, isFinite,
+  PK_DAY_MS: 86400000,
+  $: id => (els[id] = els[id] || { innerHTML: '', textContent: '' }),
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  pkExpiryDateTime: ms => new Date(ms).toISOString(),   // 只取前 10 位，时区口径由真函数负责
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+const day = n => new Date(Date.now() + n * 86400000).toISOString();
+ctx.renderExpirySnapshot({ accounts: [
+  { uid: 'aaaaaaaa-1', nickname: '秋',     credits_earliest_expiry: day(20), credits_earliest_remaining: 499 },
+  { uid: 'bbbbbbbb-2', nickname: '秋千易', credits_earliest_expiry: day(2),  credits_earliest_remaining: 41 },
+  { uid: 'cccccccc-3', nickname: '长期包', credits_earliest_expiry: null,   credits_earliest_remaining: 0 },
+  { uid: 'dddddddd-4', nickname: '零批次', credits_earliest_expiry: day(5), credits_earliest_remaining: 0 },
+]});
+const html = els['expBody'].innerHTML;
+const rows = html.split('<tr>').slice(1).map(r =>
+  [...r.matchAll(/<td[^>]*>([^<]*)<\/td>/g)].map(m => m[1]));
+process.stdout.write(JSON.stringify({
+  rows: rows.map(c => [c[0], c[2], c[3], c[4]]),
+  note: els['expNote'].textContent,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expsnap-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry snapshot node test failed: %v\n%s", err, out)
+	}
+	// 41 分 2 天后到期 → 日均需耗 21（ceil 20.5）；499 分 20 天 → 25（ceil 24.95）。
+	// 若把 ceil 改成 floor，这里必须变成 20 / 24。
+	want := `{"rows":[["秋千易","2 天","41","21"],["秋","20 天","499","25"]],` +
+		`"note":` + strconv.Quote("2 个账号有未到期批次 · 只列最早一批，全部批次见「积分构成」") + `}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("到期快照渲染不符:\n got=%s\nwant=%s", out, want)
+	}
+}
