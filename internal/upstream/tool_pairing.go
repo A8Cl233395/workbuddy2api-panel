@@ -11,6 +11,8 @@
 // 的条目让会话自愈，宁可丢一轮工具上下文，也好过整条会话死亡。
 package upstream
 
+import "strings"
+
 // repackToolResultBlocks 把插在 assistant.tool_calls 与其 tool 结果之间的非 tool 消息
 // 挪到整组之后，保证同一批 tool_call 的结果在 wire 上连续。
 //
@@ -124,6 +126,7 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 	}
 	callIDs := map[string]bool{}
 	resultIDs := map[string]bool{}
+	nameBadIDs := map[string]bool{}
 	hasTraffic := false
 	for _, m := range messages {
 		msg, ok := m.(map[string]any)
@@ -145,6 +148,9 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 					}
 					if id, ok := tc["id"].(string); ok && id != "" {
 						callIDs[id] = true
+						if toolCallNameMissing(tc) {
+							nameBadIDs[id] = true
+						}
 						hasTraffic = true
 					}
 				}
@@ -155,8 +161,17 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 		return messages, false
 	}
 	// keepCalls：调用 id 是否双侧齐全（调用存在且结果存在）。重复 id 与乱序均按集合处理。
+	//
+	// 追加否决条件：没有可用功能名（无 function 键 / 无 name 键 / name 空白）的调用一律
+	// 不保留。上游对这类条目直接判 11133 model_param_invalid（tool_calls[i].function.name
+	// must be a non-empty string），**带不带配对结果都拒**——带结果的脏条目原本会命中
+	// keepCalls 原样出站，正是线上「整条会话每轮 400、只能手动清空历史」的成因。删除动作
+	// 完全复用两侧对称裁剪（调用与其结果成对剔除），配对对称不变式照常成立。
 	keepCalls := map[string]bool{}
 	for id := range callIDs {
+		if nameBadIDs[id] {
+			continue
+		}
 		if resultIDs[id] {
 			keepCalls[id] = true
 		}
@@ -223,4 +238,25 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 		return messages, false
 	}
 	return kept, true
+}
+
+// toolCallNameMissing 报告 assistant.tool_calls[] 单项是否缺少可用的功能名：
+// function 对象缺失、name 字段缺失、name 为空白串，三者皆判真。
+//
+// 为什么比「function 在、name 键存在且为空」宽一格：本网关自己就能产出另两种形状——
+// 流在 name 分片到达前断掉时，聚合器落下的占位条目是 `{"id":..,"type":"function"}`
+// （无 function 键）或 `{"id":..,"function":{}}`（有 function 无 name 键），实测见
+// Aggregate。这类条目客户端无从派发、上游无从校验，留着只会把整条会话顶死。
+// OpenAI schema 本就要求 function.name 非空，故不存在「合法但缺名」的入站历史，
+// 判脏不会误伤正确配对——代价只是丢一轮工具上下文，正是本文件的既定取舍。
+func toolCallNameMissing(tc map[string]any) bool {
+	fn, ok := tc["function"].(map[string]any)
+	if !ok {
+		return true
+	}
+	name, ok := fn["name"].(string)
+	if !ok {
+		return true
+	}
+	return strings.TrimSpace(name) == ""
 }
