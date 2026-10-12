@@ -1112,9 +1112,10 @@ func (w *responsesWriter) ensureReasoning() error {
 }
 
 func (w *responsesWriter) ensureMessageText() error {
-	if err := w.closeReasoning(); err != nil {
-		return err
-	}
+	// 这里**不**收尾 reasoning：上游会把 reasoning_content 与 content 交错下发
+	// （思考→正文→再思考），首段正文就 done 掉会让后续思考重开一个 item，
+	// 客户端表现为「思考→显示→又思考」反复循环。reasoning 只在换工具调用或
+	// 收尾时关闭（新段落由 ensureReasoning 记住新的 item id）。
 	if w.x.textOpen {
 		return nil
 	}

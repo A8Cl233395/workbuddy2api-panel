@@ -299,6 +299,77 @@ func TestResponsesStreamEventOrder(t *testing.T) {
 	}
 }
 
+// TestResponsesInterleavedReasoningStaysOneItem 上游把 reasoning_content 与 content
+// 交错下发（思考→正文→再思考→再正文）是真实形态。契约：整条响应只允许一个
+// reasoning item —— 首段正文到达时不得把它 done 掉，否则后续 reasoning 会重开一个新
+// item，客户端就表现为「思考→显示→又思考→又显示」反复循环（并且 id 复用会让客户端
+// 的 item 表被覆盖，进而中断）。段与段之间也不能复用上一段的文本。
+func TestResponsesInterleavedReasoningStaysOneItem(t *testing.T) {
+	body := driveStream(t, nil,
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"reasoning_content":"A"}}]}`+"\n\n",
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hi"}}]}`+"\n\n",
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"reasoning_content":"B"}}]}`+"\n\n",
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"content":"!"}}]}`+"\n\n",
+		`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\n",
+		"data: [DONE]\n\n",
+	)
+
+	var events []map[string]any
+	for _, block := range strings.Split(body, "\n\n") {
+		for _, line := range strings.Split(block, "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			var m map[string]any
+			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &m) != nil {
+				continue
+			}
+			events = append(events, m)
+		}
+	}
+
+	adds, dones, summaryIDs := 0, 0, map[string]bool{}
+	for _, m := range events {
+		item, _ := m["item"].(map[string]any)
+		switch m["type"] {
+		case "response.output_item.added":
+			if item["type"] == "reasoning" {
+				adds++
+			}
+		case "response.output_item.done":
+			if item["type"] == "reasoning" {
+				dones++
+			}
+		case "response.reasoning_summary_text.delta":
+			summaryIDs[m["item_id"].(string)] = true
+		}
+	}
+	if adds != 1 || dones != 1 {
+		t.Fatalf("reasoning item 应只开一个: added=%d done=%d\n%s", adds, dones, body)
+	}
+	if len(summaryIDs) != 1 {
+		t.Fatalf("reasoning 事件落在了多个 item 上: %v\n%s", summaryIDs, body)
+	}
+
+	// 摘要文本是两段之和（不能把上一段重复带进新 item），且 reasoning 排在 message 之前。
+	var reasonings []map[string]any
+	for _, it := range sseItems(t, body) {
+		if it["type"] == "reasoning" {
+			reasonings = append(reasonings, it)
+		}
+	}
+	if len(reasonings) != 1 {
+		t.Fatalf("done 的 reasoning item 数 = %d, want 1\n%s", len(reasonings), body)
+	}
+	sum, _ := reasonings[0]["summary"].([]any)
+	if len(sum) != 1 {
+		t.Fatalf("summary=%v", reasonings[0]["summary"])
+	}
+	if got := sum[0].(map[string]any)["text"]; got != "AB" {
+		t.Fatalf("summary text=%q want %q", got, "AB")
+	}
+}
+
 func TestResponsesEndpointNonStream(t *testing.T) {
 	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
