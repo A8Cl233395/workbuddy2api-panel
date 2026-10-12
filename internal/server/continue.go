@@ -367,10 +367,13 @@ func (r *continueReader) canContinue(sawDone bool) bool {
 	case r.limitSet:
 		return false
 	case r.cutNoFinish(sawDone):
-		// 段无 finish 结束 = 上游偶发断流（线上实测：15 次续写里 1 次）。续写段
-		// 允许一次盲重试：重试请求体与断流段逐字节相同、已收内容都在 assistant
-		// 前缀里，幂等不重复。主段不给盲重试（那是请求本身失败，交由既有降级）。
-		return r.seg > 0 && !r.blindRetried
+		// 段无 finish 结束 = 上游偶发断流（线上实测：15 次续写里 1 次）。已产出内容时
+		// 允许一次盲重试：重试请求体把已收内容作为 assistant 前缀，幂等不重复。
+		// 主段同样给（此前只给 seg>0）——主段断流不是「请求本身失败」，它已经产出过
+		// 输出，把它交给截断终态正是「Codex 每次莫名中断、要手动继续」的主因（线上
+		// 实测 2 天内 27 次）。零输出段不给：没有可续的东西，且
+		// 客户端已断连时 ctx 已取消、重试发不出去，不会白烧额度。
+		return (r.seg > 0 || r.text.Len() > 0 || r.reason.Len() > 0) && !r.blindRetried
 	case r.finish != "length":
 		return false
 	case r.toolSeen:

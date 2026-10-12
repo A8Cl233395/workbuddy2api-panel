@@ -151,13 +151,42 @@ func TestContinueReaderExplicitLimitNoContinue(t *testing.T) {
 	}
 }
 
-// TestContinueReaderCutNoFinishEmitsTruncationTerminal 主段断流（有正文、无 finish、
-// 无 [DONE]）→ 补一条截断终态帧：本层契约是「上层看到的永远是一条完整且恰好一个
-// 终态的流」。此前只记 WARN 不落帧，客户端收到裸 [DONE]，把半截内容当完整答案。
-func TestContinueReaderCutNoFinishEmitsTruncationTerminal(t *testing.T) {
+// TestContinueReaderMainSegCutBlindRetry 主段断流（有正文、无 finish、无 [DONE]）也做
+// 一次盲重试：断流不是「请求本身失败」——它已经产出过内容，重试请求体把已收内容作为
+// assistant 前缀（幂等不重复），客户端因此看到的是接续而不是半截回合。线上实测这是
+// Codex「莫名中断、要手动继续」的主因。
+func TestContinueReaderMainSegCutBlindRetry(t *testing.T) {
 	cut := `data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n" +
 		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"半截正文"}}]}` + "\n\n"
 	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
+	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(cut)))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	s := string(out)
+	if len(*reqs) != 1 {
+		t.Fatalf("主段断流应发一次盲重试，got=%d", len(*reqs))
+	}
+	if !strings.Contains((*reqs)[0], "半截正文") {
+		t.Fatalf("重试请求应携带已收内容（幂等不重复）:\n%s", (*reqs)[0])
+	}
+	for _, want := range []string{"半截正文", "继续", `"finish_reason":"stop"`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("客户端可见流缺 %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, `"finish_reason":"length"`) {
+		t.Fatalf("续上之后 length 终态不应外泄:\n%s", s)
+	}
+}
+
+// TestContinueReaderMainSegCutRetryFailsEmitsTerminal 盲重试拿不到 200 → 降级补截断
+// 终态（恰好一个），客户端仍能判断这个回合是残缺的。
+func TestContinueReaderMainSegCutRetryFailsEmitsTerminal(t *testing.T) {
+	cut := `data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"半截正文"}}]}` + "\n\n"
+	up, _ := fakeContinueUpstream(t, func(call int) (int, string) { return 500, `{"code":11102,"msg":"boom"}` })
 	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
 		io.NopCloser(strings.NewReader(cut)))
 	out, err := io.ReadAll(r)
@@ -171,9 +200,6 @@ func TestContinueReaderCutNoFinishEmitsTruncationTerminal(t *testing.T) {
 	if idx := strings.Index(s, `"finish_reason":"length"`); idx < strings.Index(s, "半截正文") {
 		t.Fatalf("终态帧必须在正文之后:\n%s", s)
 	}
-	if len(*reqs) != 0 {
-		t.Fatalf("主段断流不发续写请求（续写资格只给 seg>0），got=%d", len(*reqs))
-	}
 }
 
 // TestContinueReaderCutNoContentNoTerminal 断流但零模型输出（只有 role 帧）→ 不补
@@ -181,7 +207,7 @@ func TestContinueReaderCutNoFinishEmitsTruncationTerminal(t *testing.T) {
 // 伪装成「有内容的 200」。空流判据必须留在上游侧。
 func TestContinueReaderCutNoContentNoTerminal(t *testing.T) {
 	onlyRole := `data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n"
-	up, _ := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
 	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
 		io.NopCloser(strings.NewReader(onlyRole)))
 	out, err := io.ReadAll(r)
@@ -190,6 +216,10 @@ func TestContinueReaderCutNoContentNoTerminal(t *testing.T) {
 	}
 	if strings.Contains(string(out), "finish_reason") {
 		t.Fatalf("零输出断流不得补终态（会让空流 502 观测失真）:\n%s", out)
+	}
+	// 也没有可续的东西：盲重试的资格要求「已经产出过内容」。
+	if len(*reqs) != 0 {
+		t.Fatalf("零输出断流不该发盲重试，got=%d", len(*reqs))
 	}
 }
 
@@ -279,6 +309,41 @@ func TestStreamCutMidToolCallMarksTruncated(t *testing.T) {
 	}
 	if strings.Index(body, `"tool_calls"`) > strings.Index(body, `"finish_reason":"length"`) {
 		t.Fatalf("终态必须落在工具调用帧之后:\n%s", body)
+	}
+}
+
+// TestResponsesStreamCutAutoContinued 端到端（用户报的那个症状）：上游流半路断掉
+// （有正文、无 finish_reason、无 [DONE]）→ 网关自动带已收内容续写一次 → 客户端看到的
+// 是一条连续输出、以 response.completed 正常收尾，而不是「半截 + 要手动继续」。
+func TestResponsesStreamCutAutoContinued(t *testing.T) {
+	cut := `data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"半截"}}]}` + "\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) {
+		if call == 1 {
+			return 200, cut
+		}
+		return 200, testSeg2Text
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses",
+		strings.NewReader(`{"model":"m","stream":true,"input":"hi"}`)))
+	body := rec.Body.String()
+	if len(*reqs) != 2 {
+		t.Fatalf("应恰好 1 次自动续写（共 2 次上游调用），got=%d", len(*reqs))
+	}
+	if !strings.Contains((*reqs)[1], "半截") {
+		t.Fatalf("续写请求应带已收内容（幂等不重复）:\n%s", (*reqs)[1])
+	}
+	for _, want := range []string{"半截", "继续", "response.completed"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("客户端可见流缺 %q:\n%s", want, body)
+		}
+	}
+	for _, bad := range []string{"response.incomplete", "max_output_tokens"} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("续上之后不得报截断（%s）:\n%s", bad, body)
+		}
 	}
 }
 
