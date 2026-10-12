@@ -133,6 +133,33 @@ func TestContinueReaderToolCutNoContinue(t *testing.T) {
 	}
 }
 
+// TestContinueReaderMidToolCallCutNoRetry 断流落在工具调用参数中间 → 不盲重试。
+// 与 finish=length 那条同一条理由（本文件开头写明）：工具参数已被切，重试体只带
+// 正文/推理当 assistant 前缀（continuationBody 不含残缺 tool_calls），模型会重发一遍
+// 调用，客户端在同一块里拼接两次参数 → 半截 JSON 拼成垃圾，比"不续"更糟。
+// 形态刻意带上正文（模型先说话再调工具是常态），否则零输出守卫会掩盖这条路径。
+func TestContinueReaderMidToolCallCutNoRetry(t *testing.T) {
+	cut := `data: {"id":"c","choices":[{"index":0,"delta":{"content":"好的，我来执行"}}]}` + "\n\n" +
+		`data: {"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Bash","arguments":"{\"cmd\":"}}]}}]}` + "\n\n"
+	up, reqs := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
+	r := newTestContinueReader(t, up, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(cut)))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Fatalf("工具调用中断流不得盲重试，实际发了 %d 次续写请求", len(*reqs))
+	}
+	// 客户端仍要知道这一回合是残缺的：补截断终态（恰好一个）。
+	if n := strings.Count(string(out), `"finish_reason":"length"`); n != 1 {
+		t.Fatalf("截断终态帧应恰好一个，got=%d:\n%s", n, out)
+	}
+	if !strings.Contains(string(out), `"arguments":"{\"cmd\":"`) {
+		t.Fatalf("已发出的工具分片应原样保留:\n%s", out)
+	}
+}
+
 // TestContinueReaderExplicitLimitNoContinue 客户端显式输出限额 → 截断是它的
 // 预期语义，不续写。
 func TestContinueReaderExplicitLimitNoContinue(t *testing.T) {

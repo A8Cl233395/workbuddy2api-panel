@@ -373,7 +373,9 @@ func (r *continueReader) canContinue(sawDone bool) bool {
 		// 输出，把它交给截断终态正是「Codex 每次莫名中断、要手动继续」的主因（线上
 		// 实测 2 天内 27 次）。零输出段不给：没有可续的东西，且
 		// 客户端已断连时 ctx 已取消、重试发不出去，不会白烧额度。
-		return (r.seg > 0 || r.text.Len() > 0 || r.reason.Len() > 0) && !r.blindRetried
+		// 含工具分片同样不给（与下面 length 分支同一条理由）：残缺 tool_calls 不进
+		// 重试前缀，模型会重发一遍，客户端在同一块里拼两次参数 → 半截 JSON 变垃圾。
+		return (r.seg > 0 || r.text.Len() > 0 || r.reason.Len() > 0) && !r.toolSeen && !r.blindRetried
 	case r.finish != "length":
 		return false
 	case r.toolSeen:
