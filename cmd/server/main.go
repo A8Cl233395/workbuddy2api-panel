@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -54,6 +55,8 @@ func stateSibling(stateFile, name string) string {
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
+	// 实际生效的配置路径：下面退回「默认+env」时清空，免得启动横幅报了份没读到的文件（issue #155）。
+	loadedFrom := *cfgPath
 	flag.Parse()
 
 	cfg, err := Load(*cfgPath)
@@ -69,6 +72,7 @@ func main() {
 			if err != nil {
 				// 生成失败（目录只读等）：退回纯默认 + env（旧行为兜底），不阻塞启动。
 				log.Printf("config %s not found (auto-generate failed), using defaults+env: %v", *cfgPath, err)
+				loadedFrom = ""
 				cfg, err = Load("")
 			}
 		}
@@ -430,7 +434,7 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
+	log.Print(listenBanner(cfg.Listen, loadedFrom, cfg.APIKey))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}
@@ -475,6 +479,37 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 			}
 		}
 	}
+}
+
+// listenBanner 组装启动横幅。api_key 的来源必须写明（issue #155：改了 config.json 却不
+// 生效，旧日志只写 api_key=true，看不出是 WB2A_API_KEY 覆盖了文件还是改错了文件），
+// 密钥本身只出掩码。path 传「实际加载的那份」，退回默认时传空。
+func listenBanner(listen, path, key string) string {
+	return fmt.Sprintf("workbuddy2api listening on %s (api_key=%s, 来源 %s)，管理面板 http://127.0.0.1%s/panel/",
+		listen, maskSecret(key), apiKeySource(path), panelListenPath(listen))
+}
+
+// apiKeySource 报生效的 api_key 来自哪里，顺序同 applyEnv：env 非空即覆盖文件。
+func apiKeySource(path string) string {
+	if os.Getenv("WB2A_API_KEY") != "" {
+		return "环境变量 WB2A_API_KEY"
+	}
+	if path == "" {
+		return "内置默认值"
+	}
+	return "配置文件 " + path
+}
+
+// maskSecret 只留首尾各两位便于对号入座；不足 8 位或未设置则整条隐去。
+func maskSecret(s string) string {
+	if s == "" {
+		return "(未设置)"
+	}
+	r := []rune(s)
+	if len(r) < 8 {
+		return strings.Repeat("*", len(r))
+	}
+	return string(r[:2]) + strings.Repeat("*", len(r)-4) + string(r[len(r)-2:])
 }
 
 // panelListenPath 从 listen 地址提取 ":port" 形式，用于启动日志拼面板 URL
