@@ -921,6 +921,118 @@ func TestResponsesToolContractDetails(t *testing.T) {
 	}
 }
 
+// TestResponsesNamespaceDepthBoundary 嵌套命名空间组的深度上限（namespaceMaxDepth）：
+// 上限内展开成扁平 function 且 namespace 取最内层（回程按它派发执行器）；更深的整棵子树
+// 静默丢弃、不报错。codex 0.162 的 MCP 组都是单层，这一支属防御路径。
+func TestResponsesNamespaceDepthBoundary(t *testing.T) {
+	nsNames := []string{"nsA", "nsB", "nsC", "nsD", "nsE"}
+	nest := func(depth int) string {
+		s := `{"name":"deep_tool","description":"d","parameters":{"type":"object"}}`
+		for i := depth - 1; i >= 0; i-- { // 由外向内逐层包：nsA 最外，紧贴工具的那层最内
+			s = `{"type":"namespace","name":"` + nsNames[i] + `","tools":[` + s + `]}`
+		}
+		return s
+	}
+	for _, c := range []struct {
+		depth  int
+		wantNS string // 空表示期望整棵子树被丢弃
+	}{
+		{4, "nsD"}, // 上限内
+		{5, ""},    // 超限
+	} {
+		chat, meta, err := responsesToChat([]byte(`{"model":"m","stream":true,"input":"hi","tools":[` + nest(c.depth) + `]}`))
+		if err != nil {
+			t.Fatalf("depth=%d: %v", c.depth, err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(chat, &body); err != nil {
+			t.Fatalf("depth=%d: %v", c.depth, err)
+		}
+		tools, _ := body["tools"].([]any)
+		if c.wantNS == "" {
+			if len(tools) != 0 {
+				t.Fatalf("depth=%d 超限应静默丢弃，实际出站 %v", c.depth, tools)
+			}
+			continue
+		}
+		if len(tools) != 1 {
+			t.Fatalf("depth=%d 应展开 1 个工具，实际 %v", c.depth, tools)
+		}
+		tool, _ := tools[0].(map[string]any)
+		fn, _ := tool["function"].(map[string]any)
+		if asString(fn["name"]) != "deep_tool" || meta.nsMap["deep_tool"] != c.wantNS {
+			t.Fatalf("depth=%d 出站 name=%q nsMap=%v want deep_tool / %s",
+				c.depth, asString(fn["name"]), meta.nsMap, c.wantNS)
+		}
+	}
+}
+
+// TestResponsesFlatNameAndFixupItem 钉住重名改名后两个方向的映射函数：
+//   - flatName：客户端原名 → 出站扁平名（点名 tool_choice / 回填历史 function_call 时用），
+//     ns 命中优先，否则取字典序最小，保证同输入同结果；
+//   - fixupItem：出站扁平名 → 客户端原名 + 补回 namespace（模型还可能按 ns::name /
+//     ns__name 回名，得先剥前缀再把 namespace 认回来）。
+//
+// 这两条都是「改错了不报错、只是客户端下一轮匹配不上」，所以逐分支钉死。
+func TestResponsesFlatNameAndFixupItem(t *testing.T) {
+	meta := &responsesMeta{
+		nsMap: map[string]string{"read_file_2": "codex_app", "read_file": "mcp__x"},
+		alias: map[string]string{"read_file_2": "read_file", "read_file_10": "read_file"},
+	}
+
+	// ① flatName：原名 → 出站名。
+	for _, c := range []struct{ name, ns, want string }{
+		{"read_file", "codex_app", "read_file_2"}, // ns 命中，胜过字典序
+		{"read_file", "", "read_file_10"},         // 同名两候选、无 ns：字典序最小（"…_10" < "…_2"）
+		{"read_file", "unknown", "read_file_10"},  // ns 不命中 → 同上兜底
+		{"other", "", "other"},                    // 没改名过 → 原样
+	} {
+		if got := meta.flatName(c.name, c.ns); got != c.want {
+			t.Fatalf("flatName(%q,%q)=%q want %q", c.name, c.ns, got, c.want)
+		}
+	}
+	if got := (*responsesMeta)(nil).flatName("read_file", ""); got != "read_file" {
+		t.Fatalf("nil meta flatName=%q want read_file", got)
+	}
+	if got := (&responsesMeta{}).flatName("read_file", ""); got != "read_file" {
+		t.Fatalf("空 alias flatName=%q want read_file", got)
+	}
+
+	// ② fixupItem：回程 item → 客户端认得的名字 + namespace。
+	for _, c := range []struct {
+		in       map[string]any
+		wantName string
+		wantNS   string // 空 = 不该出现 namespace 字段
+	}{
+		{map[string]any{"name": "read_file_2"}, "read_file", "codex_app"},
+		// 模型按 ns::name 回名：nsMap 认得出子名 → 用映射值当 ns。
+		{map[string]any{"name": "codex_app::read_file_2"}, "read_file", "codex_app"},
+		// ns::name 但子名不在 nsMap → 前缀当地前缀，名字原样留给客户端。
+		{map[string]any{"name": "codex_app::brand_new"}, "brand_new", "codex_app"},
+		// ns__name：逐项精确比对，namespace 自身含 __ 也不切错。
+		{map[string]any{"name": "mcp__x__read_file"}, "read_file", "mcp__x"},
+		// 两边都不认识：名字不动，也不硬塞 namespace。
+		{map[string]any{"name": "unknown_tool"}, "unknown_tool", ""},
+	} {
+		meta.fixupItem(c.in)
+		if got := asString(c.in["name"]); got != c.wantName {
+			t.Fatalf("fixupItem(%v) name=%q want %q", c.in, got, c.wantName)
+		}
+		if got := asString(c.in["namespace"]); got != c.wantNS {
+			t.Fatalf("fixupItem name=%v namespace=%q want %q", c.in["name"], got, c.wantNS)
+		}
+	}
+
+	// 空名与 nil 入参都不该 panic、也不该写出半个 item。
+	empty := map[string]any{}
+	meta.fixupItem(empty)
+	if len(empty) != 0 {
+		t.Fatalf("空名 item 被改写：%v", empty)
+	}
+	meta.fixupItem(nil)                    // nil item
+	(*responsesMeta)(nil).fixupItem(empty) // nil meta
+}
+
 // Responses→Chat：工具结果里的图片必须活下来，且只能落在紧随工具消息之后的合成 user
 // 消息里 —— Chat 的 tool 消息不许带图（OpenAI 直接 400）；插早一步会打断
 // assistant.tool_calls 与 tool 消息的配对（并行工具调用判 11148）。
