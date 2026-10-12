@@ -78,6 +78,27 @@ func TestUpstreamErrorCodeRewritten(t *testing.T) {
 	}
 }
 
+// reasoning 字段：thinking.go 的回填把客户端送来的 reasoning_content 镜像进
+// reasoning（且回填就排在 sanitizeMessages 之前），此前只洗 content /
+// reasoning_content / tool_calls → 镜像出来的那一份指纹原样出站。
+// 注意指纹字面量必须与 sanitizeFeatures 里的形态逐字一致。
+func TestSanitizeMessagesScrubsReasoningField(t *testing.T) {
+	// 用 ccIdentity（测试文件里已有的纯 ASCII 指纹常量）当脏内容：它走同一条
+	// sanitizeText 改写路径，且不用硬编码数字串（本仓工具链会改写数字字面量）。
+	ms := []any{map[string]any{
+		"role":      "assistant",
+		"content":   "hi",
+		"reasoning": ccIdentity,
+	}}
+	if !sanitizeMessages(ms) {
+		t.Fatal("reasoning 字段里的指纹未被净化")
+	}
+	got, _ := ms[0].(map[string]any)["reasoning"].(string)
+	if got == ccIdentity {
+		t.Fatalf("reasoning 未被净化: %q", got)
+	}
+}
+
 // 回归：工具调用消息的 content 常为 null，而旧版 sanitizeMessages 在 content 缺失时
 // 直接 continue，整条消息连 tool_calls 一起被跳过 → arguments 里的被拦字符串原样漏出。
 func TestToolCallArgumentsSanitized(t *testing.T) {
