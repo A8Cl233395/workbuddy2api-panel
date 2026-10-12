@@ -315,6 +315,96 @@ func TestMessagesStreamEventOrder(t *testing.T) {
 	}
 }
 
+// TestMessagesInterleavedReasoningKeepsBlocksWellFormed 上游把 reasoning 与正文交错
+// 下发（思考→正文→再思考→再正文）时，messages 侧的块必须始终是「一个开着一个」：
+// 每次 content_block_start 配一次 stop、块号严格递增、thinking/text delta 各归各类。
+// 这条路径与 responses 侧不同——那边整条响应只能有一个 reasoning item，这边切回思考
+// 前会先把正文块停掉（ensureThinking），所以交替是可表达的；怕的是将来改成"不关块"
+// 或复用块号：Claude Code 按 index 收块，两个块同时开着就会串。
+func TestMessagesInterleavedReasoningKeepsBlocksWellFormed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := &messagesWriter{ResponseWriter: rec, stream: true}
+	rw.Header().Set("Content-Type", "text/event-stream")
+	for _, rc := range []string{"A", "B"} {
+		frames := []string{
+			`data: {"id":"c","choices":[{"index":0,"delta":{"reasoning_content":"` + rc + `"}}]}` + "\n\n",
+			`data: {"id":"c","choices":[{"index":0,"delta":{"content":"x` + rc + `"}}]}` + "\n\n",
+		}
+		for _, f := range frames {
+			if _, err := rw.Write([]byte(f)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := rw.Write([]byte("data: [DONE]\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	rw.finish()
+	body := rec.Body.String()
+
+	var open = map[int]string{} // index → block type
+	var starts, stops int
+	var lastIdx = -1
+	maxOpen := 0
+	for _, blk := range strings.Split(body, "\n\n") {
+		ev := ""
+		var obj map[string]any
+		for _, l := range strings.Split(blk, "\n") {
+			if strings.HasPrefix(l, "event: ") {
+				ev = strings.TrimPrefix(l, "event: ")
+			}
+			if strings.HasPrefix(l, "data: ") {
+				_ = json.Unmarshal([]byte(strings.TrimPrefix(l, "data: ")), &obj)
+			}
+		}
+		if obj == nil {
+			continue
+		}
+		idx := -1
+		if v, ok := obj["index"].(float64); ok {
+			idx = int(v)
+		}
+		switch ev {
+		case "content_block_start":
+			starts++
+			if idx <= lastIdx {
+				t.Fatalf("块号不递增：%d 接在 %d 之后\n%s", idx, lastIdx, body)
+			}
+			lastIdx = idx
+			cb, _ := obj["content_block"].(map[string]any)
+			open[idx] = asString(cb["type"])
+		case "content_block_stop":
+			stops++
+			if _, ok := open[idx]; !ok {
+				t.Fatalf("stop 了没开的块 index=%d\n%s", idx, body)
+			}
+			delete(open, idx)
+		case "content_block_delta":
+			d, _ := obj["delta"].(map[string]any)
+			dt := asString(d["type"])
+			bt := open[idx]
+			if (dt == "thinking_delta") != (bt == "thinking") || (dt == "text_delta") != (bt == "text") {
+				t.Fatalf("delta 落错块：delta=%s block=%s index=%d\n%s", dt, bt, idx, body)
+			}
+		}
+		if len(open) > maxOpen {
+			maxOpen = len(open)
+		}
+	}
+	if starts != stops || len(open) != 0 {
+		t.Fatalf("块未配平：start=%d stop=%d 未关=%v\n%s", starts, stops, open, body)
+	}
+	if maxOpen != 1 {
+		t.Fatalf("同时开着的块数 = %d，应为 1\n%s", maxOpen, body)
+	}
+	if starts != 4 {
+		t.Fatalf("两段思考+两段正文应开 4 个块，实际 %d\n%s", starts, body)
+	}
+	if strings.Count(body, `"type":"message_stop"`) != 1 {
+		t.Fatalf("message_stop 应恰好一个\n%s", body)
+	}
+}
+
 func TestMessagesEndpoint(t *testing.T) {
 	for _, path := range []string{"/v1/messages", "/messages"} {
 		up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
