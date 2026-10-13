@@ -701,6 +701,12 @@ func (c *cacheMissSignal) noteCacheTokens(model string, prompt, hit, miss int64)
 	if miss <= 0 {
 		miss = prompt
 	}
+	// 判据是「重算占比」而非「hit 为 0」：上游会只报极小的重算量（实测 miss=3 /
+	// prompt=52703，命中率 99.99%），此时 hit=0 只说明本帧没有命中的 token，不代表
+	// 大前缀被整段重算（issue #170 假阳性，会淹没真告警）。
+	if miss*2 < prompt {
+		return
+	}
 	if !c.everHit[model] {
 		return
 	}

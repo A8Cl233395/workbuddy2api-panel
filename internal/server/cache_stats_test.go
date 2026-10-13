@@ -77,4 +77,11 @@ func TestCacheMissSignal(t *testing.T) {
 	cacheMissWarn.noteCacheTokens("glm-5.3", 500, 0, 500)
 	// miss 缺失（上游只回 hit=0、无 miss、无 prompt）不触发。
 	cacheMissWarn.noteCacheTokens("glm-5.3", 0, 0, 0)
+	// issue #170：显式 miss 极小（3/52703 = 99.99% 命中）不算「整段未命中」。
+	// 此前判据只看 hit>0，这组自相矛盾的字段（hit 缺席/为 0）会打出假告警。
+	cacheMissWarn.noteCacheTokens("gpt-6-luna", 52703, 52700, 3) // 先建立 everHit
+	cacheMissWarn.noteCacheTokens("gpt-6-luna", 52703, 0, 3)
+	if !cacheMissWarn.last["gpt-6-luna"].IsZero() {
+		t.Fatal("显式 miss 极小（3/52703）不应触发整段未命中告警")
+	}
 }
