@@ -429,6 +429,40 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	}
 }
 
+// TestChatHeadVetoRotatesToHealthyAccount 上游用「HTTP 200 + 首帧 error 帧」表达失败
+// （6004 限流/审核的真实形态）：网关一个字节都没写出，这次尝试整体作废并换号——客户端
+// 最终拿到健康号的正常流。修复前只能透出 200 + error 帧，客户端看到的是失败。
+func TestChatHeadVetoRotatesToHealthyAccount(t *testing.T) {
+	calls := map[string]int{}
+	const errFrame = "data: {\"error\":{\"message\":\"rate limited\",\"code\":6004}}\n\ndata: [DONE]\n\n"
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		if authz == "Bearer at-bad" {
+			return 200, errFrame, true
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000, 0) // 确定性源 r=0 → 先选 bad
+	p.SetCredits("good", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s (want 200 from healthy account)", rec.Code, rec.Body)
+	}
+	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
+		t.Errorf("calls=%v want bad=1 good=1", calls)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "rate limited") || !strings.Contains(body, "你好") {
+		t.Errorf("客户端不应看到被否决的 error 帧，且应拿到健康号正文：%q", body)
+	}
+}
+
 // TestChatSoftCoolsOnRateLimitBody 端到端回归 issue #28：上游用非 429 状态码
 // （400 + 限流文案）表达模型侧限流时，该账号必须进入 CoolSoft 冷却，而不是只换号。
 // 修复前 Classify 归 ErrClient → applyErrorPolicy 走 default 分支只换号不罚，

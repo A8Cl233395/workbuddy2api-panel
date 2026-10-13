@@ -1062,10 +1062,39 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
 			}), upstream.WithMarkupRepair(repair))
+			// 首帧否决（见 upstream.HeadVetoError）：网关一个字节都没写出，这次尝试对
+			// 客户端完全无痕——按错误类型处置账号后换号，而不是把「HTTP 200 + error 帧」
+			// 透给客户端（SSE 发过字节就改不了状态码，此前只能这么兜底）。
+			var hv *upstream.HeadVetoError
+			if errors.As(sErr, &hv) {
+				recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+				st.status = http.StatusServiceUnavailable
+				st.outcome = reqlog.OutcomeStreamError
+				// 上游 body 是活的（200 长流），随轮转立即关闭，不留给函数末尾的 defer 堆 fd。
+				rc.Close()
+				fail(acct.UID)
+				if hv.Payload == "" {
+					// 零有效帧：上游缺陷，不是账号的问题（不罚号），但换号值得一试。
+					lastErr = sErr
+					log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (no byte written, rotating)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
+				} else {
+					// 帧内错误没有独立 HTTP 状态：末端映射只看 Kind，Status 仅作信封占位。
+					kind := upstream.FrameKind(hv.Payload)
+					h.applyErrorPolicy(acct.UID, kind, hv.Payload, bareModel, nil)
+					lastErr = &upstream.Error{Kind: kind, Msg: hv.Payload}
+					log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame before first byte kind=%s payload=%s (rotating)",
+						logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(hv.Payload, 200))
+				}
+				if !rotateBackoff(i, r.Context()) {
+					break // ctx 取消：终止轮转（首帧否决换号退避）
+				}
+				continue
+			}
 			switch {
 			case upstream.IsEmptyStreamError(sErr):
-				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
-				// 兜底（HTTP 头已发出只能 200），但这是上游缺陷不是成功——日志/
+				// 上游 200 但空流（0 有效帧）：只有「注释/心跳行已先写出、响应头已提交」
+				// 的残留形态能走到这里（首帧否决已把零字节形态换号了）。StreamHint 已写
+				// error 帧 + [DONE] 兜底（只能 200），但这是上游缺陷不是成功——日志/
 				// 状态收敛到 502 观测，与非流式 Aggregate 空流→502 upstream_parse
 				// 同语义（此前 `_ =` 吞错把失败流记成 200，运维看到假成功）。
 				// 只认 IsEmptyStreamError：客户端断连的写失败不误标（人已走，
@@ -1260,7 +1289,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIErrorHint(w, status, code, msg, hint)
 	}
 	st.status = status
-	st.outcome = reqlog.OutcomeHTTPError
+	// 上游流级失败（首帧否决 / 流内 error 帧）的观测是 stream_error：客户端拿到 503
+	// 只是「网关没能提交流」的结果，不是另一类故障，别在这里洗成 http_error。
+	if st.outcome != reqlog.OutcomeStreamError {
+		st.outcome = reqlog.OutcomeHTTPError
+	}
 }
 
 // hardCreditMessage 池内无号可试、原因全是积分耗尽时的自有文案（无上游原文可
