@@ -176,6 +176,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
+	p.mux.HandleFunc("GET /panel/api/error_summary", p.withAuth(p.errorSummary))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
@@ -287,6 +288,21 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 // archive_error：任务日志落盘故障（写失败不影响请求；前端可提示）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot(), "archive_error": p.logs.ArchiveError()})
+}
+
+// errorSummary 把日志环里的 WARN/ERR 按「账号 × 类型」聚合（见 errors.go）。
+// 与日志同源、零新增存储：环里有几行就聚合几行。
+func (p *Panel) errorSummary(w http.ResponseWriter, r *http.Request) {
+	entries := p.logs.Snapshot()
+	lines := make([]LogLine, 0, len(entries))
+	for _, e := range entries {
+		lines = append(lines, LogLine{Text: e.Text, TS: e.TS})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rows":       AggregateErrors(lines),
+		"scanned":    len(entries),
+		"updated_at": time.Now().Format("15:04:05"),
+	})
 }
 
 // requestMetrics 返回进程内请求指标、最近 100 条与归档状态。

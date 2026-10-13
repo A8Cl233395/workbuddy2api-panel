@@ -806,11 +806,12 @@ async function loadLogs() {
   const rq = trangeQuery('reqRange', false);
   rq.set('limit', limit);
   try {
-    const [d, metrics, requestRows, credit] = await Promise.all([
+    const [d, metrics, requestRows, credit, errSum] = await Promise.all([
       api('logs'),
       api('request_metrics').catch(() => ({})),
       api('request_logs?' + rq.toString()).catch(() => ({ entries: [] })),
       api('credit_history?limit=' + creditLimitValue()).catch(() => null),
+      api('error_summary').catch(() => null),
     ]);
     // 归档开启时以归档为准——「区间内没有记录」是一个真实结果，不能回落成内存里
     // 的最近 100 条（那会把筛选条件之外、时间范围之外的请求显示出来）。
@@ -834,7 +835,27 @@ async function loadLogs() {
       ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
       : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
     renderCreditHistory(credit);
+    renderErrorSummary(errSum);
   } catch (e) { /* 概览已提示 */ }
+}
+
+/* 错误汇总（后端 /panel/api/error_summary 已聚合+排序）：只渲染，不在这里再算。 */
+function renderErrorSummary(d) {
+  const rows = (d && d.rows) || [];
+  $('errBody').innerHTML = rows.length ? rows.map(r =>
+    '<tr class="' + (r.sev === 'bad' ? 'lv-e' : r.sev === 'warn' ? 'lv-w' : '') + '">' +
+    '<td>' + esc(r.account || '—') + '</td>' +
+    '<td>' + esc(r.kind) + '</td>' +
+    '<td>' + esc(r.code || '—') + '</td>' +
+    '<td>' + esc(r.model || '—') + '</td>' +
+    '<td class="num">' + r.count + '</td>' +
+    '<td>' + esc(r.last || '—') + '</td>' +
+    '<td>' + esc(r.until || '—') + '</td>' +
+    '<td class="sample" title="' + esc(r.sample || '') + '">' + esc(r.sample || '') + '</td></tr>'
+  ).join('') : '<tr><td colspan="8" style="color:var(--ink-3)">窗口内没有可归类的 WARN/ERR</td></tr>';
+  $('errNote').textContent = d
+    ? '扫描 ' + (d.scanned || 0) + ' 行 · ' + rows.length + ' 类 · 截至 ' + (d.updated_at || '—')
+    : '—';
 }
 
 function renderRequestMetrics(m, entries) {
