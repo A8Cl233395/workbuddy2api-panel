@@ -1404,7 +1404,7 @@ const els = {};
 const ctx = {
   Date, Math, Number, String, isFinite,
   PK_DAY_MS: 86400000,
-  $: id => (els[id] = els[id] || { innerHTML: '', textContent: '' }),
+  $: id => (els[id] = els[id] || { innerHTML: '', textContent: '', addEventListener: () => {} }),
   esc: s => String(s == null ? '' : s),
   fmtTok: v => String(v == null ? 0 : v),
   pkExpiryDateTime: ms => new Date(ms).toISOString(),   // 只取前 10 位，时区口径由真函数负责
@@ -1419,11 +1419,21 @@ ctx.renderExpirySnapshot({ accounts: [
   { uid: 'dddddddd-4', nickname: '零批次', credits_earliest_expiry: day(5), credits_earliest_remaining: 0 },
 ]});
 const html = els['expBody'].innerHTML;
-const rows = html.split('<tr>').slice(1).map(r =>
+const cells = h => h.split('<tr>').slice(1).map(r =>
   [...r.matchAll(/<td[^>]*>([^<]*)<\/td>/g)].map(m => m[1]));
+const rows = cells(html);
+const note = els['expNote'].textContent;   // 两次渲染前先取，下同
+
+// 5 个将到期账号 → 只展开最近 3 个，其余 2 个收纳成一行且默认收起。
+ctx.renderExpirySnapshot({ accounts: [1,2,3,4,5].map(n => ({ uid: 'u' + n, nickname: 'A' + n,
+  credits_earliest_expiry: day(n), credits_earliest_remaining: 10 * n })) });
+const html2 = els['expBody'].innerHTML;
 process.stdout.write(JSON.stringify({
   rows: rows.map(c => [c[0], c[2], c[3], c[4]]),
-  note: els['expNote'].textContent,
+  note: note,
+  head: cells(html2.split('<tr class="pk-group-summary"')[0]).map(c => [c[0], c[2]]),
+  restHidden: (html2.match(/<tr data-exp-row="rest" hidden>/g) || []).length,
+  label: (html2.match(/data-exp-rest="\d+"[^>]*>([^<]+)</) || ['', ''])[1],
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "expsnap-*.cjs")
 	if err != nil {
@@ -1440,7 +1450,9 @@ process.stdout.write(JSON.stringify({
 	// 41 分 2 天后到期 → 日均需耗 21（ceil 20.5）；499 分 20 天 → 25（ceil 24.95）。
 	// 若把 ceil 改成 floor，这里必须变成 20 / 24。
 	want := `{"rows":[["秋千易","2 天","41","21"],["秋","20 天","499","25"]],` +
-		`"note":` + strconv.Quote("2 个账号有未到期批次 · 只列最早一批，全部批次见「积分构成」") + `}`
+		`"note":` + strconv.Quote("2 个账号有未到期批次 · 只列最早一批，全部批次见「积分构成」") + `,` +
+		// 收纳：只展开最近到期的 3 个（A1/A2/A3 按到期升序），其余 2 个 hidden。
+		`"head":[["A1","1 天"],["A2","2 天"],["A3","3 天"]],"restHidden":2,"label":"其余 2 个账号，展开"}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("到期快照渲染不符:\n got=%s\nwant=%s", out, want)
 	}

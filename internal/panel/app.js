@@ -2774,7 +2774,8 @@ if ($('pkDetail')) $('pkDetail').addEventListener('click', ev => {
    一起到。此前账号池页对「谁快到期」一个字都不显示，要看得切进「积分构成」页打
    一轮逐账号实时查询（本部署 20 个号约 2.7s）。
    快照只有**最早一批**，完整批次仍看那一页；剩余天数口径与 pkExpiryText 一致
-   （ceil 到天），否则同一条批次两页会各说一个数。 */
+   （ceil 到天），否则同一条批次两页会各说一个数。
+   默认只展开最近到期的 3 个账号，其余收纳（20 个号一屏铺不下）。 */
 function renderExpirySnapshot(d) {
   const rows = [];
   for (const a of (d && d.accounts) || []) {
@@ -2784,21 +2785,41 @@ function renderExpirySnapshot(d) {
     rows.push({ a, ms, remain });
   }
   rows.sort((x, y) => x.ms - y.ms);
-  $('expBody').innerHTML = rows.length ? rows.map(({ a, ms, remain }) => {
+  const EXP_HEAD = 3;  // 默认只展开最近到期的 3 个账号，其余收纳成一行
+  const rowOf = ({ a, ms, remain }, hidden) => {
     const days = Math.max(0, Math.ceil((ms - Date.now()) / PK_DAY_MS));
     const color = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
-    return '<tr>' +
+    return '<tr' + (hidden ? ' data-exp-row="rest" hidden' : '') + '>' +
       '<td>' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</td>' +
       '<td>' + esc(pkExpiryDateTime(ms).slice(0, 10)) + '</td>' +
       '<td class="num" style="color:' + color + '">' + (days === 0 ? '今天' : days + ' 天') + '</td>' +
       '<td class="num">' + fmtTok(remain) + '</td>' +
       '<td class="num">' + fmtTok(Math.ceil(remain / Math.max(1, days))) + '</td>' +
       '</tr>';
-  }).join('') : '<tr><td colspan="5">暂无未来到期批次</td></tr>';
+  };
+  // 收纳行沿用「积分构成」页的分组行样式（pk-group-summary / pk-group-toggle）。
+  const rest = rows.slice(EXP_HEAD);
+  $('expBody').innerHTML = !rows.length ? '<tr><td colspan="5">暂无未来到期批次</td></tr>'
+    : rows.slice(0, EXP_HEAD).map(r => rowOf(r, false)).join('') +
+      (rest.length ? '<tr class="pk-group-summary"><td colspan="5">' +
+        '<button type="button" class="pk-group-toggle" data-exp-rest="' + rest.length +
+        '" aria-expanded="false">其余 ' + rest.length + ' 个账号，展开</button></td></tr>' +
+        rest.map(r => rowOf(r, true)).join('') : '');
   $('expNote').textContent = rows.length
     ? rows.length + ' 个账号有未到期批次 · 只列最早一批，全部批次见「积分构成」'
     : '暂无未来到期批次';
 }
+
+// 收纳行展开/收起（与「积分构成」页 pkDetail 同款：查 data 行 + aria-expanded + 改按钮文案）。
+if ($('expBody')) $('expBody').addEventListener('click', ev => {
+  const btn = ev.target.closest('button[data-exp-rest]');
+  if (!btn) return;
+  const expanded = btn.getAttribute('aria-expanded') === 'true';
+  btn.closest('tbody').querySelectorAll('tr[data-exp-row="rest"]').forEach(row => { row.hidden = expanded; });
+  btn.setAttribute('aria-expanded', String(!expanded));
+  btn.textContent = (expanded ? '其余 ' : '收起其余 ') + btn.dataset.expRest + ' 个账号' +
+    (expanded ? '，展开' : '');
+});
 
 // 按需拉取（移植上游 8391a05）：packages 是**逐账号实时查上游**，切进本视图就打一次，
 // 账号一多既慢又压上游。有缓存先直接渲染（标注数据年龄），只有首次进入或显式刷新生效。
