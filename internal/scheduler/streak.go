@@ -91,9 +91,10 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 
 // compactJSON 裁剪奖品载荷（日志单行可读）。
 func compactJSON(raw json.RawMessage) string {
-	s := string(raw)
-	if len(s) > 220 {
-		return s[:220] + "…"
+	// logfmt.Truncate 回退到 UTF-8 rune 边界：奖品名是中文，按字节切会打出半个字。
+	s := logfmt.Truncate(string(raw), 220)
+	if len(raw) > 220 {
+		s += "…"
 	}
 	return s
 }
