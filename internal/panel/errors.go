@@ -42,7 +42,23 @@ var (
 	reModel    = regexp.MustCompile(`model=([^\s:,]+)`)           // model=glm-5.2（尾随 :/, 是句读，不是模型名）
 	reCode     = regexp.MustCompile(`"code"\s*:\s*"?(\d+)"?`)     // body 里的业务码
 	reReset    = regexp.MustCompile(`将在\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})|will reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})`)
+	// 调度族失败行（scheduler）：`WARN: keepalive 昵称(uid8): <err>` —— 账号标签紧跟任务名，
+	// 没有 acct= 前缀，账号要从这里取。
+	reTask = regexp.MustCompile(`^(?:WARN: |ERR: )?(checkin|keepalive|balance|travel|activity|user-resource|streak-bonus|blackcat|lottery) ([^:]+):`)
 )
+
+// taskKinds 调度任务名 → 错误类型（人话）。
+var taskKinds = map[string]string{
+	"checkin":       "签到失败",
+	"keepalive":     "保活失败",
+	"balance":       "余额查询失败",
+	"travel":        "猫猫旅行失败",
+	"activity":      "活跃上报失败",
+	"user-resource": "账号资源查询失败",
+	"streak-bonus":  "连登兑换/抽奖失败",
+	"blackcat":      "夜猫子任务失败",
+	"lottery":       "抽奖失败",
+}
 
 // kindOf 把一行归类为「人话类型 + 上游码 + 严重度」。空类型 = 不参与聚合。
 //
@@ -101,7 +117,15 @@ func kindOf(line string) (kind, code string, sev string) {
 		case strings.Contains(line, "rotate backoff aborted"):
 			kind, sev = "轮转退避中止", sevInfo
 		default:
-			return "", "", ""
+			if m := reTask.FindStringSubmatch(line); m != nil {
+				kind, sev = taskKinds[m[1]], sevWarn
+				// 连续 12153 禁用是账号级终态，比"某次保活失败"严重。
+				if strings.Contains(line, "session dead") {
+					sev = sevBad
+				}
+			} else {
+				return "", "", ""
+			}
 		}
 	}
 	// 模型级限流单列：6004 与账号级 429 的处置完全不同（换模型 vs 等冷却）。
@@ -142,6 +166,8 @@ func AggregateErrors(lines []LogLine) []ErrStat {
 		acct := ""
 		if m := reAcct.FindStringSubmatch(txt); m != nil {
 			acct = m[1]
+		} else if m := reTask.FindStringSubmatch(txt); m != nil {
+			acct = strings.TrimSpace(m[2]) // 调度族：账号标签紧跟任务名
 		}
 		model := ""
 		if m := reModel.FindStringSubmatch(txt); m != nil {

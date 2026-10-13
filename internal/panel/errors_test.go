@@ -58,6 +58,31 @@ func TestAggregateErrors(t *testing.T) {
 	}
 }
 
+// 调度族（scheduler）失败行：账号标签紧跟任务名、无 acct= 前缀，且连续 12153 禁用
+// 是账号级终态（bad）而非普通任务失败。
+func TestAggregateErrorsSchedulerFamily(t *testing.T) {
+	ts := time.Now()
+	got := AggregateErrors([]LogLine{
+		{Text: `WARN: keepalive 示例号(11f49997): 连续 3 次 12153 session dead — 禁用`, TS: ts},
+		{Text: `WARN: checkin 备用号(aabbccdd): Post "https://x": connection refused`, TS: ts},
+		{Text: `WARN: balance 备用号(aabbccdd): context deadline exceeded`, TS: ts},
+		{Text: `checkin 示例号(11f49997): 签到成功`, TS: ts}, // 正常流转无前缀 → 不参与
+	})
+	if len(got) != 3 {
+		t.Fatalf("行数=%d want 3：%+v", len(got), got)
+	}
+	// bad 在前：保活连续 12153 禁用
+	if got[0].Kind != "保活失败" || got[0].Sev != sevBad || got[0].Account != "示例号(11f49997)" {
+		t.Errorf("first=%+v", got[0])
+	}
+	if got[1].Kind != "签到失败" || got[1].Account != "备用号(aabbccdd)" {
+		t.Errorf("second=%+v", got[1])
+	}
+	if got[2].Kind != "余额查询失败" {
+		t.Errorf("third=%+v", got[2])
+	}
+}
+
 // 模型级限流的解除时刻从上游文案抽取（「将在 … 重置」/ 英文形态都认）。
 func TestAggregateErrorsResetUntil(t *testing.T) {
 	line := `WARN: [upstream] chat_stream acct=a1b2c3d4: upstream 429 soft_rate body={"code":6004,"msg":"rate limited, will reset at 2026-10-14 02:00:00"}`
