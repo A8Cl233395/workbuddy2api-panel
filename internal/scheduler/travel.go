@@ -75,7 +75,7 @@ func (s *Scheduler) RunTravelNow() {
 func (s *Scheduler) travelOne(a *auth.Auth) {
 	buddy, err := s.cfg.Upstream.BuddyInfo(a)
 	if err != nil {
-		log.Printf("travel %s: buddy-info: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: travel %s: buddy-info: %v", logfmt.Label(a.UID, a.Nickname), err)
 		return
 	}
 	if buddy == nil {
@@ -84,7 +84,7 @@ func (s *Scheduler) travelOne(a *auth.Auth) {
 	}
 	ts, err := s.cfg.Upstream.TravelStatus(a)
 	if err != nil {
-		log.Printf("travel %s: status: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: travel %s: status: %v", logfmt.Label(a.UID, a.Nickname), err)
 		return
 	}
 	switch ts.State {
@@ -106,7 +106,7 @@ func (s *Scheduler) travelDepart(a *auth.Auth, ts *upstream.TravelState) {
 		return
 	}
 	if err := s.cfg.Upstream.TravelDepart(a, travelLocationID); err != nil {
-		log.Printf("travel %s: depart: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: travel %s: depart: %v", logfmt.Label(a.UID, a.Nickname), err)
 		return
 	}
 	log.Printf("travel %s: depart ok location=%d", logfmt.Label(a.UID, a.Nickname), travelLocationID)
@@ -120,7 +120,7 @@ func (s *Scheduler) travelClaim(a *auth.Auth, ts *upstream.TravelState) {
 	}
 	reward, err := s.cfg.Upstream.TravelClaim(a, ts.RecordID)
 	if err != nil {
-		log.Printf("travel %s: claim record=%d: %v", logfmt.Label(a.UID, a.Nickname), ts.RecordID, err)
+		log.Printf("WARN: travel %s: claim record=%d: %v", logfmt.Label(a.UID, a.Nickname), ts.RecordID, err)
 		return
 	}
 	log.Printf("travel %s: claim ok record=%d reward=%d", logfmt.Label(a.UID, a.Nickname), ts.RecordID, reward)
@@ -139,12 +139,12 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) {
 	}
 	// 前置：解锁 first_buddy 任务（幂等；失败不阻塞，让 buddy/first 按既有错误路径暴露）。
 	if err := s.cfg.Upstream.ReportChatActivity(a, fmt.Sprintf("wb2api-adopt-%d", time.Now().UnixMilli()), ""); err != nil {
-		log.Printf("travel %s: adopt preflight report: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: travel %s: adopt preflight report: %v", logfmt.Label(a.UID, a.Nickname), err)
 	} else {
 		time.Sleep(adoptReportGap) // 给上游事件处理留时间（对齐脚本实测的 1.05s 间隔口径）
 	}
 	if err := s.cfg.Upstream.BuddyAgreement(a); err != nil {
-		log.Printf("travel %s: agreement: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: travel %s: agreement: %v", logfmt.Label(a.UID, a.Nickname), err)
 		return
 	}
 	err := s.cfg.Upstream.BuddyFirst(a)
@@ -155,7 +155,7 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) {
 		s.markAdoptTried(a.UID)
 		log.Printf("travel %s: adopt skipped (conversation threshold not reached, retry tomorrow)", logfmt.Label(a.UID, a.Nickname))
 	default:
-		log.Printf("travel %s: adopt: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: travel %s: adopt: %v", logfmt.Label(a.UID, a.Nickname), err)
 	}
 }
 

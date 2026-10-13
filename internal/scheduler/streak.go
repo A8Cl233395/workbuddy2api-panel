@@ -49,7 +49,7 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 
 	full, err := s.cfg.Upstream.GrowthStreakFull(a)
 	if err != nil {
-		log.Printf("streak-bonus %s: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: streak-bonus %s: %v", logfmt.Label(a.UID, a.Nickname), err)
 		return
 	}
 	statuses := map[string]string{
@@ -64,7 +64,7 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 		}
 		if err := s.cfg.Upstream.GrowthRedeemTier(a, tier.Tier); err != nil {
 			// 未解锁（403）属预期，静默；其余记日志。
-			log.Printf("streak-bonus %s: redeem %s: %v", logfmt.Label(a.UID, a.Nickname), tier.Tier, err)
+			log.Printf("WARN: streak-bonus %s: redeem %s: %v", logfmt.Label(a.UID, a.Nickname), tier.Tier, err)
 			continue
 		}
 		log.Printf("streak-bonus %s: ★ 兑换 %s 档（+%dc +%de 卡×%d 抽奖×%d）",
@@ -73,13 +73,13 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 	// 抽奖：按当前 chances 全抽完（兑换刚发的次数已在服务端累加）。
 	chances, err := s.cfg.Upstream.LotteryChances(a)
 	if err != nil {
-		log.Printf("streak-bonus %s: lottery summary: %v", logfmt.Label(a.UID, a.Nickname), err)
+		log.Printf("WARN: streak-bonus %s: lottery summary: %v", logfmt.Label(a.UID, a.Nickname), err)
 		return
 	}
 	for i := 0; i < chances; i++ {
 		raw, err := s.cfg.Upstream.LotteryDraw(a)
 		if err != nil {
-			log.Printf("streak-bonus %s: draw: %v", logfmt.Label(a.UID, a.Nickname), err)
+			log.Printf("WARN: streak-bonus %s: draw: %v", logfmt.Label(a.UID, a.Nickname), err)
 			return
 		}
 		log.Printf("streak-bonus %s: 🎲 第%d抽 %s", logfmt.Label(a.UID, a.Nickname), i+1, compactJSON(raw))
@@ -115,7 +115,7 @@ func (s *Scheduler) makeupMissed(a *auth.Auth) {
 	for i, n := 0, min(full.MakeupCards.Balance, len(broken)); i < n; i++ {
 		d := broken[len(broken)-1-i]
 		if err := s.cfg.Upstream.UseMakeupCard(a, d); err != nil {
-			log.Printf("streak-bonus %s: 补签 %s 失败: %v", logfmt.Label(a.UID, a.Nickname), d, err)
+			log.Printf("WARN: streak-bonus %s: 补签 %s 失败: %v", logfmt.Label(a.UID, a.Nickname), d, err)
 			return
 		}
 		log.Printf("streak-bonus %s: ★ 已用补签卡补签 %s（保连登）", logfmt.Label(a.UID, a.Nickname), d)
