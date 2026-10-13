@@ -611,6 +611,8 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 **企业版照常的能力**：选号派发、保活（token 刷新仍必需——不刷新同样会过期失效）、额度查询。
 
+**企业切换会话（`token_source=enterprise_switch`）**：同属上述「预留功能」，本部署**同样未验证**——实测 20 个号全为 `oneid_login`、`enterpriseId` 全空，故这条判定在现网恒为 `false`，**不改变任何现有行为**（保留它是为了将来接入企业号时行为类任务不再白跑）。浏览器在**企业空间**状态下完成 OAuth 时，签发的 JWT payload 带 `token_source=enterprise_switch`，而账号本身 `enterpriseId` 仍为空——只看 `enterpriseId` 识别不出来，故单列 `auth.Auth.IsEnterpriseSession()`。该形态的上游表现与真企业版**不同**：成长任务列表 / 额度查询 / 领养 Buddy 等**读端点照常**，但 `/v2/report` 行为事件**返回 200 却被静默丢弃**（上游 PR #162 实测：15 个成长任务恒 `0/x`，90s 内逐 15s 回读进度从不跳动），连登 / 签到同样不计分，即「读得见、记不上账」。因此行为类任务（活跃上报 / 连登 / 旅行 / 夜猫子 / 面板成长任务执行）按它跳过并在面板给出重登指引；签到与任务列表扫描不受影响，额度查询 / 选号 / 保活照常（额度仍按 `IsEnterprise` 口径，两者刻意不合并——切换会话不改计费口径）。
+
 企业额度不在个人「资源包」体系内（`get-user-resource*` 对 `enterpriseId` 账号恒返回空 `Accounts`，面板因此长期显示 0），故额度改走 `POST /v2/billing/meter/get-enterprise-user-usage`：上游 `credit` 是**本周期已用**（与个人口径「剩余」语义相反），`limitNum` 是**分配给该账号的额度**，网关据此换算 `剩余 = limitNum - credit`；`limitNum = -1` 为不限量（面板显示「不限」，且不参与周期分桶）。企业配额按周期重置（`cycleResetTime`），未用完即作废，故周期末会参与 `prefer_expiring` 优先消耗。
 
 > 成员账号**无权查询企业池总额度**（实测：池端点在成员 token 下返回 `403 not_authorized`，`/console/accounts` 显示 `isAdmin=false`）。面板展示的只是**该账号被分配的额度**；企业池余额只有企业管理员在管理后台可见。
