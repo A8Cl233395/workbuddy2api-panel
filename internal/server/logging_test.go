@@ -549,10 +549,14 @@ func TestLogChatRowShowsThinkingTokens(t *testing.T) {
 	out := captureStdout(t, func() {
 		logChatRowFull(1200*time.Millisecond, 8*time.Second, "deepseek-v4.1-flash", "stream",
 			"u123456789", "示例号", http.StatusOK, 1450, 1255, 0, 0, false,
-			"req-x", reqlog.OutcomeSuccess, 1, 0.02, true, "", "")
+			"req-x", reqlog.OutcomeSuccess, 1, 0.02, true, "", "", 15*time.Millisecond, 1400*time.Millisecond)
 	})
 	if !strings.Contains(out, "tok=1450 think=1255") {
 		t.Errorf("row should show thinking tokens: %s", out)
+	}
+	// 分段耗时列（见 upstream.ChatTiming）：把 TTFB 拆成 prep/do 两段，未测量时不出现。
+	if !strings.Contains(out, "prep=15ms do=1400ms") {
+		t.Errorf("row should show prep/do split: %s", out)
 	}
 	out2 := captureStdout(t, func() {
 		logChatRow(1200*time.Millisecond, 8*time.Second, "deepseek-v4.1-flash", "stream",

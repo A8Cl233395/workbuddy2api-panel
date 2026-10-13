@@ -274,7 +274,7 @@ func (r *continueReader) endSegment(sawDone bool) {
 		blind := !sawDone && r.finish == ""
 		body, err := r.continuationBody()
 		if err == nil {
-			rc, status, _, terr := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta)
+			rc, status, _, terr := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta, nil)
 			if terr == nil && status < 400 && rc != nil {
 				r.seg++
 				if blind {

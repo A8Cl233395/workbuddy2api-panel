@@ -73,6 +73,10 @@ type chatStat struct {
 	clientIP  string
 	userAgent string
 
+	// 上游调用分段耗时（见 upstream.ChatTiming）：prep 本地准备、do 上游往返。
+	// 零值 = 未测量（非流式/未走到上游）。
+	prep, do time.Duration
+
 	logged bool
 }
 
@@ -95,7 +99,7 @@ func (s *chatStat) done() {
 	logChatRowFull(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks,
 		s.think, s.cacheHit, s.cacheMiss, s.hasCache,
 		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit,
-		s.clientIP, s.userAgent)
+		s.clientIP, s.userAgent, s.prep, s.do)
 	s.budget.add(s.credit, s.hasCredit)
 	noteProm(s, total)
 }
@@ -574,7 +578,7 @@ const (
 //
 // logChatRow 旧形态（带缓存命中率、无请求 ID）；新代码请用 logChatRowFull。
 func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int, cacheHit, cacheMiss int, hasCache bool) {
-	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, -1, cacheHit, cacheMiss, hasCache, "", "", 0, 0, false, "", "")
+	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, -1, cacheHit, cacheMiss, hasCache, "", "", 0, 0, false, "", "", 0, 0)
 }
 
 // logChatRowEx 带请求 ID、结果、重试、积分与调用来源字段的扩展形态；缓存列不传
@@ -583,14 +587,14 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 	requestID, outcome string, attempts int, credit float64, hasCredit bool,
 	clientIP, userAgent string) {
 	logChatRowFull(ttfb, total, model, mode, uid, nick, status, toks, -1, 0, 0, false,
-		requestID, outcome, attempts, credit, hasCredit, clientIP, userAgent)
+		requestID, outcome, attempts, credit, hasCredit, clientIP, userAgent, 0, 0)
 }
 
 // logChatRowFull 是本文件唯一的行输出点：宽表字段 + 缓存列 + 可选请求 ID/结果/重试/积分尾段 + 调用来源段。
 func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int,
 	think int, cacheHit, cacheMiss int, hasCache bool,
 	requestID, outcome string, attempts int, credit float64, hasCredit bool,
-	clientIP, userAgent string) {
+	clientIP, userAgent string, prep, do time.Duration) {
 	if !chatLogEnabled {
 		return
 	}
@@ -624,6 +628,12 @@ func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, st
 	if hasCache && cacheHit+cacheMiss > 0 {
 		cacheField = fmt.Sprintf("%d%%", cacheHit*100/(cacheHit+cacheMiss))
 	}
+	// 分段耗时尾段（见 upstream.ChatTiming）：把 TTFB 拆成「本地准备 prep + 上游往返 do」。
+	// 只在本跳真测量过时输出——非流式/未启用留空，旧行格式不变。
+	split := ""
+	if do > 0 || prep > 0 {
+		split = fmt.Sprintf(" prep=%dms do=%dms", prep.Milliseconds(), do.Milliseconds())
+	}
 	extra := ""
 	if requestID != "" {
 		if outcome == "" {
@@ -649,7 +659,7 @@ func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, st
 		}
 		src = fmt.Sprintf(" src=%s ua=%s |", dashIfEmpty(clientIP), ua)
 	}
-	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | cache=%s | total=%.1fs |%s%s\n",
+	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | cache=%s | total=%.1fs |%s%s%s\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
@@ -661,6 +671,7 @@ func logChatRowFull(ttfb, total time.Duration, model, mode, uid, nick string, st
 		logfmt.Pad(tokpsField, chatRateWidth),
 		logfmt.Pad(cacheField, chatCacheWidth),
 		total.Seconds(),
+		split,
 		extra,
 		src,
 	)
