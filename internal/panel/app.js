@@ -2404,6 +2404,8 @@ if ($('btnUsage')) $('btnUsage').onclick = loadUsage;
 if ($('usRange')) trangeBind('usRange', loadUsage);
 
 /* ── 积分构成 ─────────────────────────────────────────────────────── */
+// 套餐标签（后端 pool.ClassifyPlan 判定，unknown 不显示）：一眼看出该指望哪个号。
+const PLAN_LABELS = { free: '免费版', trial: '体验版', activity: '活动号', standard: '标准版' };
 /* 一个账号的余额是若干积分包之和。包按来源命名（「国内运营裂变包」「拉新权益包」
    「个人体验版」…），面额从 6 到 1500 不等，且**按次发放**。所以两个任务完成度
    完全一致的账号，余额可能差上千——差别只在包里。这里把逐包明细摊开，并给每个
@@ -2686,7 +2688,8 @@ function renderPackages(d, detailLimit) {
       '<span class="realm">' + esc(a.realm || '') + '</span></div>' +
       '<div class="big">' + fmtTok(a.remain) + '</div>' +
       '<div class="sub">共 ' + fmtTok(a.size) + ' · ' + (a.packages || []).length +
-      ' 个包 · 占最高 ' + (Number(a.remain || 0) / maxRemain * 100).toFixed(0) + '%</div>' +
+      ' 个包 · 占最高 ' + (Number(a.remain || 0) / maxRemain * 100).toFixed(0) + '%' +
+      (PLAN_LABELS[a.plan] ? ' · ' + PLAN_LABELS[a.plan] : '') + '</div>' +
       '<div class="mixbar">' + bar + '</div>' +
       '<div class="pk-legend">' + legend + '</div>' +
       '</div>';

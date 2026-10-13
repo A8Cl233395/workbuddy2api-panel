@@ -940,7 +940,10 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 		Remain   int64                    `json:"remain"`
 		Size     int64                    `json:"size"`
 		Packages []upstream.CreditPackage `json:"packages"`
-		Error    string                   `json:"error,omitempty"`
+		// Plan/PlanEvidence 账号套餐分类（见 pool.ClassifyPlan）：包名派生，无包时 unknown。
+		Plan         pool.PlanKind `json:"plan"`
+		PlanEvidence string        `json:"plan_evidence,omitempty"`
+		Error        string        `json:"error,omitempty"`
 	}
 	out := make([]row, len(accts))
 
@@ -969,6 +972,11 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 			it.Packages = packs
 			it.Remain = remain
 			it.Size = size
+			names := make([]string, 0, len(packs))
+			for _, pk := range packs {
+				names = append(names, pk.Name)
+			}
+			it.Plan, it.PlanEvidence = pool.ClassifyPlan(names)
 			out[i] = it
 		}(i, s)
 	}
