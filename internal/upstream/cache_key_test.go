@@ -133,9 +133,10 @@ func TestInjectPromptCacheKey_EmptyConversation(t *testing.T) {
 	}
 }
 
-// TestChatMetaCacheKeySource 缓存槽来源与头部来源分开：无 conversation_id 时缓存槽跟网关
-// 派生的粘性会话键（CacheKeyID），但 X-Conversation-ID 仍然不发（不伪造）；客户端自带
-// conversation_id 时缓存槽仍以客户端声明为准。
+// TestChatMetaCacheKeySource 无 conversation_id 的客户端：缓存槽（prompt_cache_key）与
+// X-Conversation-ID 头**同源**，都跟网关派生的粘性会话键（CacheKeyID）——实测该头才是上游
+// 前缀缓存槽的实际来源，不发它时大前缀在 hy4/step 这类后端上恒 0% 命中（issue #169）。
+// 客户端自带 conversation_id 时两者仍以客户端声明为准（原值透传，不覆盖）。
 func TestChatMetaCacheKeySource(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -143,7 +144,7 @@ func TestChatMetaCacheKeySource(t *testing.T) {
 		wantKey   string
 		wantConvH string
 	}{
-		{"仅粘性键", ChatMeta{CacheKeyID: "sess-abc"}, buildCacheKey("u1", "sess-abc"), ""},
+		{"仅粘性键", ChatMeta{CacheKeyID: "sess-abc"}, buildCacheKey("u1", "sess-abc"), buildCacheKey("u1", "sess-abc")},
 		{"客户端会话优先", ChatMeta{ConversationID: "conv-1", CacheKeyID: "sess-abc"}, buildCacheKey("u1", "conv-1"), "conv-1"},
 		{"两源皆空", ChatMeta{}, buildCacheKey("u1", ""), ""},
 	} {
@@ -167,7 +168,7 @@ func TestChatMetaCacheKeySource(t *testing.T) {
 				t.Errorf("prompt_cache_key=%q want %q", got, tc.wantKey)
 			}
 			if gotConv != tc.wantConvH {
-				t.Errorf("X-Conversation-ID=%q want %q（客户端没给就不该伪造）", gotConv, tc.wantConvH)
+				t.Errorf("X-Conversation-ID=%q want %q（无客户端声明时用 uid 隔离的会话键）", gotConv, tc.wantConvH)
 			}
 		})
 	}
