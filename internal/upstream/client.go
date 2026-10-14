@@ -847,7 +847,8 @@ func (c *Client) chatBase(a *auth.Auth) string {
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
-func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
+// 返回改写后的请求体与本次实际生效的思考档位（见 normalizeReasoningEffort）。
+func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) ([]byte, string) {
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	maxOut := c.modelMaxOutSnapshot(realm)
 	if realmKey(realm) == "global" {
@@ -856,11 +857,11 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 		//（issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
-	body = PrepareBodyOptWithEffortsDefaultAndCaps(body, c.SanitizeFingerprints.Load(), efforts, defs, maxOut)
+	body, effort := PrepareBodyOptWithEffortsDefaultAndCaps(body, c.SanitizeFingerprints.Load(), efforts, defs, maxOut)
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)
-	return body
+	return body, effort
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
@@ -1085,9 +1086,10 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		ctx = context.Background()
 	}
 	prepStart := time.Now()
-	prepared := c.prepareBody(body, a.Realm(), a.UID, cacheKeySource(meta))
+	prepared, effort := c.prepareBody(body, a.Realm(), a.UID, cacheKeySource(meta))
 	if timing != nil {
 		timing.Prep += time.Since(prepStart)
+		timing.Effort = effort // 生效思考档位（客户端未携带该字段时为空）
 	}
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)

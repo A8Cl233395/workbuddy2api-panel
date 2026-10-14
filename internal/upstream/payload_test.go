@@ -92,6 +92,55 @@ func TestNormalizeRoles(t *testing.T) {
 	})
 }
 
+// 档位不在模型支持列表里时取「最近档」，不再一律降级（issue #175）：Codex 等客户端
+// 默认发 medium，而 CN 模型常见档位是 low/high/max（无 medium）——旧逻辑取「≤ medium
+// 的最高支持档」会降到 low，比**不携带该字段**时的模型默认档 high 还弱且客户端无感。
+// 同距时优先模型声明的默认档，其次偏高的一档。返回值即日志行里显示的生效档位。
+func TestPrepareBodyOptEffortNearestPick(t *testing.T) {
+	efforts := map[string][]string{
+		"deepseek-v4.1-flash": {"low", "high", "max"}, // 无 medium（线上实测的真实形状）
+		"tie-default-low":     {"low", "high"},        // medium 与 low/high 同距，默认档 low
+		"tie-no-default":      {"low", "high"},        // 同距且模型未声明默认档 → 宁高
+		"gap-only":            {"low", "medium"},
+	}
+	defaults := map[string]string{
+		"deepseek-v4.1-flash": "high",
+		"tie-default-low":     "low",
+		"gap-only":            "high",
+	}
+	cases := []struct{ name, body, want string }{
+		{"无 medium 时取最近档 high（不再降到 low）",
+			`{"model":"deepseek-v4.1-flash","reasoning_effort":"medium"}`, "high"},
+		{"同距优先模型默认档",
+			`{"model":"tie-default-low","reasoning_effort":"medium"}`, "low"},
+		{"同距且无默认档 → 宁高",
+			`{"model":"tie-no-default","reasoning_effort":"medium"}`, "high"},
+		{"xhigh 取最近档 medium",
+			`{"model":"gap-only","reasoning_effort":"xhigh"}`, "medium"},
+		{"高于最高档取最高支持档",
+			`{"model":"gap-only","reasoning_effort":"max"}`, "medium"},
+		{"低于最低档取最低支持档",
+			`{"model":"deepseek-v4.1-flash","reasoning_effort":"minimal"}`, "low"},
+		{"支持则原样透传",
+			`{"model":"deepseek-v4.1-flash","reasoning_effort":"max"}`, "max"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, eff := PrepareBodyOptWithEffortsDefaultAndCaps([]byte(c.body), false, efforts, defaults, nil)
+			var m map[string]any
+			if err := json.Unmarshal(out, &m); err != nil {
+				t.Fatalf("unmarshal: %v (body=%s)", err, out)
+			}
+			if got := m["reasoning_effort"]; got != c.want {
+				t.Errorf("reasoning_effort=%v want %v", got, c.want)
+			}
+			if eff != c.want {
+				t.Errorf("生效档位回传=%q want %q（日志行显示的就是它）", eff, c.want)
+			}
+		})
+	}
+}
+
 func TestPrepareBodyOptWithEfforts(t *testing.T) {
 	efforts := map[string][]string{
 		"glm-5.2":      {"off", "low", "high"},
@@ -173,23 +222,23 @@ func TestInjectCatalogMaxTokens(t *testing.T) {
 	}
 
 	// 无限额 + 目录命中 → 补上（int64 落 JSON 后按 float64 读回）。
-	body := PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","messages":[]}`), false, nil, nil, maxOut)
+	body, _ := PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","messages":[]}`), false, nil, nil, maxOut)
 	assertMaxTokens(t, body, float64(393216), false)
 
 	// 显式 max_tokens 优先：不覆盖。
-	body = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","max_tokens":123,"messages":[]}`), false, nil, nil, maxOut)
+	body, _ = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","max_tokens":123,"messages":[]}`), false, nil, nil, maxOut)
 	assertMaxTokens(t, body, float64(123), false)
 
 	// 别名 max_completion_tokens 翻译后同样算显式限额，不被目录值覆盖。
-	body = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","max_completion_tokens":456,"messages":[]}`), false, nil, nil, maxOut)
+	body, _ = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","max_completion_tokens":456,"messages":[]}`), false, nil, nil, maxOut)
 	assertMaxTokens(t, body, float64(456), false)
 
 	// 模型未知 → 不补。
-	body = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"unknown","messages":[]}`), false, nil, nil, maxOut)
+	body, _ = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"unknown","messages":[]}`), false, nil, nil, maxOut)
 	assertMaxTokens(t, body, nil, true)
 
 	// 快照 nil → 不补（旧行为完全一致）。
-	body = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","messages":[]}`), false, nil, nil, nil)
+	body, _ = PrepareBodyOptWithEffortsDefaultAndCaps([]byte(`{"model":"deepseek-v4.1-flash","messages":[]}`), false, nil, nil, nil)
 	assertMaxTokens(t, body, nil, true)
 }
 

@@ -549,7 +549,7 @@ func TestLogChatRowShowsThinkingTokens(t *testing.T) {
 	out := captureStdout(t, func() {
 		logChatRowFull(1200*time.Millisecond, 8*time.Second, "deepseek-v4.1-flash", "stream",
 			"u123456789", "示例号", http.StatusOK, 1450, 1255, 0, 0, false,
-			"req-x", reqlog.OutcomeSuccess, 1, 0.02, true, "", "", 15*time.Millisecond, 1400*time.Millisecond)
+			"req-x", reqlog.OutcomeSuccess, 1, 0.02, true, "", "", 15*time.Millisecond, 1400*time.Millisecond, "high")
 	})
 	if !strings.Contains(out, "tok=1450 think=1255") {
 		t.Errorf("row should show thinking tokens: %s", out)
@@ -558,10 +558,17 @@ func TestLogChatRowShowsThinkingTokens(t *testing.T) {
 	if !strings.Contains(out, "prep=15ms do=1400ms") {
 		t.Errorf("row should show prep/do split: %s", out)
 	}
+	// 生效思考档位列（issue #175）：客户端要 medium 实际发出去 high 时行里必须能看到。
+	if !strings.Contains(out, "effort=high") {
+		t.Errorf("row should show effective reasoning effort: %s", out)
+	}
 	out2 := captureStdout(t, func() {
 		logChatRow(1200*time.Millisecond, 8*time.Second, "deepseek-v4.1-flash", "stream",
 			"u123456789", "示例号", http.StatusOK, 1450, 0, 0, false)
 	})
+	if strings.Contains(out2, "effort=") {
+		t.Errorf("未携带档位的请求行不应出现 effort=: %s", out2)
+	}
 	if strings.Contains(out2, "think=") {
 		t.Errorf("think= 不该出现在没有该观测的行里: %s", out2)
 	}

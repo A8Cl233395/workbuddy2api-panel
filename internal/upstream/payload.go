@@ -15,9 +15,9 @@ func PrepareBodyOpt(src []byte, sanitize bool) []byte {
 	return PrepareBodyOptWithEffortsAndDefault(src, sanitize, nil, nil)
 }
 
-// PrepareBodyOptWithEfforts 在 PrepareBodyOpt 基础上按模型 supportedEfforts 降级 reasoning_effort：
-// 仅当请求显式携带且模型不支持该档位时，改为 ≤请求档位的最高支持档；支持档全部高于请求档时取最低档；
-// 未知模型/未知档位/未携带该字段一律透传。efforts 为 nil 表示未知（不降级）。
+// PrepareBodyOptWithEfforts 在 PrepareBodyOpt 基础上把 reasoning_effort 对齐到模型支持的档位：
+// 仅当请求显式携带且模型不支持该档位时，改为**最近**的支持档（同距优先模型默认档，其次偏高）；
+// 未知模型/未知档位/未携带该字段一律透传。efforts 为 nil 表示未知（不改写）。
 //
 // 向后兼容封装：不传 defaultEfforts（无模型声明默认档），thinking.go 回退硬编码 high。
 func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]string) []byte {
@@ -28,19 +28,21 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 // defaultEfforts（模型声明默认档）补档。defaultEfforts 为 nil 时与旧行为一致
 // （deepseek 缺档回退硬编码 high）。
 func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string) []byte {
-	return PrepareBodyOptWithEffortsDefaultAndCaps(src, sanitize, efforts, defaultEfforts, nil)
+	body, _ := PrepareBodyOptWithEffortsDefaultAndCaps(src, sanitize, efforts, defaultEfforts, nil)
+	return body
 }
 
 // PrepareBodyOptWithEffortsDefaultAndCaps 在 …AndDefault 之上接入模型输出上限快照：
 // 无显式限额的请求按目录动态值补 max_tokens（见 injectCatalogMaxTokens）。
 // maxOut 为 nil 时行为与 …AndDefault 完全一致。
-func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64) []byte {
+// 返回改写后的请求体与本次**实际生效**的思考档位（未携带该字段/未知模型/未知档位 → ""）。
+func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64) ([]byte, string) {
 	if len(src) == 0 {
-		return src
+		return src, ""
 	}
 	var obj map[string]any
 	if err := json.Unmarshal(src, &obj); err != nil {
-		return src
+		return src, ""
 	}
 	obj["stream"] = true
 	// max_completion_tokens → max_tokens 翻译（吸收上游 PR #116，Closes #117）：
@@ -83,7 +85,7 @@ func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts 
 	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
 	modelName, _ := obj["model"].(string)
 	injectThinking(obj, lookupDefaultEffort(defaultEfforts, modelName))
-	normalizeReasoningEffort(obj, efforts)
+	effort := normalizeReasoningEffort(obj, efforts, defaultEfforts)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)
@@ -94,9 +96,9 @@ func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts 
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {
-		return src
+		return src, effort
 	}
-	return out
+	return out, effort
 }
 
 // translateMaxCompletionTokens 把 OpenAI 别名 max_completion_tokens 翻译为上游
@@ -186,22 +188,26 @@ func injectCatalogMaxTokens(obj map[string]any, maxOut map[string]int64) {
 // effortRank 档位从低到高。
 var effortRank = map[string]int{"off": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5, "max": 6}
 
-// normalizeReasoningEffort 按模型 supportedEfforts 降级 reasoning_effort（snake/camel 双字段兼容）。
+// normalizeReasoningEffort 把请求档位对齐到模型支持的档位（snake/camel 双字段兼容），
+// 返回本次最终生效的档位（未携带字段/未知模型/未知档位/模型未缓存 → ""）。
 //   - 请求档位模型支持 → 原样透传
-//   - 请求档位不支持 → 改为 ≤请求档位的最高支持档（降级）
-//   - 支持档全部高于请求档 → 取最低支持档（偏离最小）
+//   - 不支持 → 取**最近**的支持档；距离相同优先模型声明的默认档，其次偏高的一档
 //   - 未知模型/未知档位/未携带字段/模型未缓存 → 一律透传
-func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
+//
+// 为什么不一律降级：Codex 等客户端默认发 medium，而 CN 模型常见档位是 low/high/max
+// （没有 medium）——一律取「≤ 请求档的最高档」会降到 low，比**不携带该字段**时的模型
+// 默认档 high 还弱，客户端完全无感（issue #175）。
+func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string, defaultEfforts map[string]string) string {
 	if len(efforts) == 0 {
-		return
+		return ""
 	}
 	model, _ := obj["model"].(string)
 	if model == "" {
-		return
+		return ""
 	}
 	supported, ok := efforts[model]
 	if !ok || len(supported) == 0 {
-		return
+		return ""
 	}
 	key := ""
 	if _, present := obj["reasoning_effort"]; present {
@@ -209,44 +215,53 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	} else if _, present := obj["reasoningEffort"]; present {
 		key = "reasoningEffort"
 	} else {
-		return
+		return ""
 	}
 	reqStr, ok := obj[key].(string)
 	if !ok {
-		return
+		return ""
 	}
 	reqStr = strings.TrimSpace(strings.ToLower(reqStr))
 	reqIdx, known := effortRank[reqStr]
 	if !known {
-		return
+		return ""
 	}
-	// 在 ≤请求档位的支持档里选最高档；命中且与请求不同才改写。
-	best, bestIdx := "", -1
+	// 取最近档：距离最小；同距优先模型默认档，其次偏高的一档。
+	def := strings.ToLower(strings.TrimSpace(lookupDefaultEffort(defaultEfforts, model)))
+	best, bestIdx, bestDist := "", -1, 1<<30
 	for _, s := range supported {
 		idx, k := effortRank[strings.TrimSpace(strings.ToLower(s))]
-		if k && idx <= reqIdx && idx > bestIdx {
-			best, bestIdx = s, idx
+		if !k {
+			continue
 		}
-	}
-	if best != "" {
-		if !strings.EqualFold(best, reqStr) {
-			obj[key] = best
-			log.Printf("reasoning_effort downgraded model=%s %s -> %s", model, reqStr, best)
+		dist := idx - reqIdx
+		if dist < 0 {
+			dist = -dist
 		}
-		return
-	}
-	// 支持档全部高于请求档：取最低支持档。
-	lowest, lowestIdx := "", 1<<30
-	for _, s := range supported {
-		idx, k := effortRank[strings.TrimSpace(strings.ToLower(s))]
-		if k && idx < lowestIdx {
-			lowest, lowestIdx = s, idx
+		if dist > bestDist {
+			continue
 		}
+		if dist == bestDist {
+			curDef := def != "" && strings.EqualFold(strings.TrimSpace(s), def)
+			bestDef := def != "" && strings.EqualFold(best, def)
+			switch {
+			case curDef && !bestDef: // 默认档优先
+			case curDef == bestDef && idx > bestIdx: // 同距宁高
+			default:
+				continue
+			}
+		}
+		best, bestIdx, bestDist = s, idx, dist
 	}
-	if lowest != "" {
-		obj[key] = lowest
-		log.Printf("reasoning_effort floored model=%s %s -> %s", model, reqStr, lowest)
+	if best == "" {
+		return reqStr
 	}
+	if !strings.EqualFold(best, reqStr) {
+		obj[key] = best
+		log.Printf("reasoning_effort adjusted model=%s %s -> %s（模型支持 %s）",
+			model, reqStr, best, strings.Join(supported, ","))
+	}
+	return best
 }
 
 // normalizeRoles 把 messages 里的 developer 角色归一为 system。

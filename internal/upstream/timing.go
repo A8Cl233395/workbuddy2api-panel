@@ -16,6 +16,9 @@ import "time"
 type ChatTiming struct {
 	Prep time.Duration // 本地请求体准备
 	Do   time.Duration // 上游 Do（含建连/首字节；路径 fallback 累加）
+	// Effort 本次实际生效的思考档位（客户端携带过 reasoning_effort 才有值；未携带/未知
+	// 模型/未知档位 → 空）。改写可能把它换成模型支持的最近档，行里显示的就是生效值。
+	Effort string
 }
 
 // Total 返回已测量的分段合计（未测量的段为零值，不计入）。
