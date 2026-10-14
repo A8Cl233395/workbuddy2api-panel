@@ -416,6 +416,28 @@ func TestNoteSuccessIncrementsAndRecords(t *testing.T) {
 	}
 }
 
+// Reason 只在冷却/禁用时透出（issue #171-1）：软冷却按墙钟恢复，到期后 until/coolKind/
+// reason 字段留在内存里不会被清理（NoteSuccess 只清熔断/连败，不碰这些），若无条件透出，
+// 面板会在「可用」旁边挂一条一周前的「429 rate limit」。
+func TestStatusReasonOnlyWhileCooling(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Cooldown("u1", CoolSoft, time.Hour, "429 rate limit")
+	st, _ := p.Status("u1")
+	if !st.Cooling || st.Reason != "429 rate limit" {
+		t.Fatalf("冷却中应透出原因: cooling=%v reason=%q", st.Cooling, st.Reason)
+	}
+	// 冷却到期（字段仍在，无人清理）
+	p.Cooldown("u1", CoolSoft, -time.Second, "429 rate limit")
+	st2, _ := p.Status("u1")
+	if st2.Cooling {
+		t.Fatalf("until 已过期不应再算冷却: %+v", st2)
+	}
+	if st2.Reason != "" {
+		t.Errorf("到期后不得透出过期 reason: %q（面板会「可用」+ 过期限流文案并排）", st2.Reason)
+	}
+}
+
 func TestReenableClearsCoolingNotBreaker(t *testing.T) {
 	// C5：签到解冻只清冷却（until/coolKind/reason）+ 更新 credits，不清熔断
 	// （fails/retryCount/breakerUntil）。签到成功只证明余额与 billing 通道恢复，

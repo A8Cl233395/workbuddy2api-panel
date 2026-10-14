@@ -675,7 +675,6 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Priority:                 p.priorityOf(uid),
 		Share:                    p.shareOf(uid),
 		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil),
-		Reason:                   e.reason,
 		Disabled:                 e.disabled,
 		Paused:                   e.paused,
 		SuccessCount:             e.successCount,
@@ -692,6 +691,12 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		InFlight:                 int(e.inFlight.Load()),
 		BreakerFails:             e.fails,
 		BreakerUntil:             e.breakerUntil,
+	}
+	// Reason 只在冷却/禁用时透出（issue #171-1）：软冷却按墙钟恢复、到期不会清理字段
+	// （Cooldown/CooldownSoftRate 写、NoteSuccess 不碰），无条件透出会让面板把「可用」
+	// 和一周前的「429 rate limit」并排显示，分不清是历史残留还是当前限流。
+	if st.Cooling || st.Disabled {
+		st.Reason = e.reason
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。
