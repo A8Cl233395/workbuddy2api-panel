@@ -15,6 +15,15 @@ import (
 	"time"
 )
 
+// responsesWebsocketUnsupported 回应 Codex 的 WS 升级探测（GET /v1/responses）。
+// 426 是客户端**立刻且粘性**回落 HTTPS 的信号：Codex 的 websocket_fallback 用例确认
+// 见到 426 只握手 1 次就转 POST，否则要空转 max_retries 次（日志里的「Reconnecting… n/5」）。
+// 本网关不保存 previous_response_id / 连接内状态，WS 复用无从谈起。
+func (h *Handler) responsesWebsocketUnsupported(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Upgrade", "websocket")
+	http.Error(w, "websocket transport unsupported; use POST /v1/responses (set supports_websockets = false)", http.StatusUpgradeRequired)
+}
+
 func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {

@@ -152,6 +152,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	// Codex 客户端在 supports_websockets/prefer_websockets 时先探 GET /v1/responses 升级 WS。
+	// 本网关不做连接内 previous_response_id 复用，回 426 让它立刻粘性回落 HTTPS。
+	h.mux.HandleFunc("GET /v1/responses", h.withAuth(h.responsesWebsocketUnsupported))
 	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, false) }))
 	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(func(w http.ResponseWriter, r *http.Request) { h.images(w, r, true) }))
 	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.messages))

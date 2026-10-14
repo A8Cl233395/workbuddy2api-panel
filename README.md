@@ -725,6 +725,7 @@ http://127.0.0.1:7863/panel/
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | `chat_completions`：OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
 | `POST /v1/responses` | Bearer（`api_key` 非空时） | `codex_responses`：Codex Responses 入站，转成现有 chat 完成并回写 Responses 事件流。不保存 `previous_response_id` / `store` |
 | `POST /v1/messages`、`POST /messages` | Bearer 或 `x-api-key`（`api_key` 非空时） | `anthropic_messages`：Anthropic Messages 入站，转成现有 chat 完成并回写 Messages JSON / SSE。不回传 thinking（上游没有 signature） |
+| `GET /v1/responses` | Bearer（`api_key` 非空时） | 固定回 **426 Upgrade Required**（带 `Upgrade: websocket`）。Codex 客户端在 `supports_websockets`/`prefer_websockets` 下会先探 WS 升级，426 是它**立刻且粘性**回落 HTTPS 的信号；否则它要空转 `stream_max_retries` 次才回落（日志里的 `Reconnecting… n/5`）。本网关不保存 `previous_response_id` / 连接内状态，WS 复用无从谈起 |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（模型级限流全清单，无锁为 null） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |

@@ -370,6 +370,32 @@ func TestResponsesInterleavedReasoningStaysOneItem(t *testing.T) {
 	}
 }
 
+// Codex 的 WS 探测（GET /v1/responses）必须回 426：这是它立刻且粘性回落 HTTPS 的信号
+// （见 Codex 的 websocket_fallback 用例：426 只握手 1 次，否则要空转 max_retries 次）。
+func TestResponsesWebsocketProbeGets426(t *testing.T) {
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/responses", nil))
+	if rec.Code != http.StatusUpgradeRequired {
+		t.Fatalf("code=%d want 426", rec.Code)
+	}
+	if rec.Header().Get("Upgrade") != "websocket" {
+		t.Fatalf("426 必须带 Upgrade: websocket，got %q", rec.Header().Get("Upgrade"))
+	}
+}
+
+// 这条 GET 路由不能抢走 POST。
+func TestResponsesPostNotShadowedByWebsocketRoute(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"glm-5.2","input":"hi","stream":false}`)))
+	if rec.Code != 200 {
+		t.Fatalf("POST code=%d want 200", rec.Code)
+	}
+}
+
 func TestResponsesEndpointNonStream(t *testing.T) {
 	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
