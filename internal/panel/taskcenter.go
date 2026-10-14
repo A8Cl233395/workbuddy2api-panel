@@ -53,15 +53,6 @@ func (p *Panel) scanAccountGrowth(a *auth.Auth) scanAccountItem {
 		it.SkipReason = "企业版无个人成长体系（任务端点上游 403）"
 		return it
 	}
-	// 企业切换会话（token_source=enterprise_switch）同跳：任务列表读得到，但执行后
-	// 行为事件被上游静默丢弃（200 不计分）——每项都是零收益白跑（含 expert_5 等真实
-	// 对话配额），故不入队并给出重登指引（见 auth.IsEnterpriseSession）。
-	if a.IsEnterpriseSession() {
-		it.Skipped = true
-		it.SkipReason = "企业切换会话（token_source=enterprise_switch）：行为事件被上游静默丢弃，成长任务不计分；请移除账号后以个人身份重新登录"
-		return it
-	}
-
 	var errors []string
 	if tasks, err := p.cfg.Upstream.ListTasks(a); err != nil {
 		errors = append(errors, "list tasks: "+err.Error())

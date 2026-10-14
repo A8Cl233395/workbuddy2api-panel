@@ -157,12 +157,8 @@ func TestEnterpriseCheckinStillRefreshesCredits(t *testing.T) {
 }
 
 // sessionTestScheduler 与 enterpriseTestScheduler 同构，只差 token 形态：
-// switched=true 时 AccessToken 是带 token_source=enterprise_switch 的 JWT
-// （企业**切换会话**：浏览器在企业空间下授权签发，账号 enterpriseId 仍为空——
-// 只看 enterpriseId 识别不出来的那一类）；false 为个人号对照组。
-//
-// 【预留能力】本部署无此类账号（实测 20 个号 token_source 全为 oneid_login），
-// 这条用例守的是「将来真接入企业号时行为类任务不白跑」，不是现网回归。
+// switched=true 时 AccessToken 是带 token_source=enterprise_switch 的 JWT（该章只记
+// 本次授权走了哪条流程，账号 enterpriseId 仍为空）；false 为个人号对照。
 func sessionTestScheduler(t *testing.T, switched bool) (*Scheduler, *recorderUpstream) {
 	t.Helper()
 	r := &recorderUpstream{}
@@ -188,13 +184,11 @@ func sessionTestScheduler(t *testing.T, switched bool) (*Scheduler, *recorderUps
 	return s, r
 }
 
-// TestEnterpriseSessionGateSkipsBehaviorTasks 企业切换会话的行为类任务门控：
-// /v2/report 等行为事件对该形态返回 200 却被上游静默丢弃（上游 PR #162 实测：
-// 15 个成长任务全部 0/x 且 90s 内进度从不跳动），执行即零收益白跑——
-// 活跃上报 / 连登管家 / 猫猫旅行 / 夜猫子必须一个上游调用都不发；
-// 签到不在此列（对该形态未观测到静默失败，且失败是显式报错）。
-// 每个子用例配个人号对照，证明「没发请求」是门控生效而非构造有误。
-func TestEnterpriseSessionGateSkipsBehaviorTasks(t *testing.T) {
+// TestStampedTokenNotGated 带 token_source=enterprise_switch 的**个人版**号不再被门控：
+// 实测两个只带该章的号成长任务全部 claimed、行为事件照常计分（该章只记授权流程），
+// 企业形态一律以 enterpriseId 为准（auth.IsEnterprise）。故五类任务必须照常发起上游
+// 调用，与个人号对照完全一致——这是「别再把该章当企业上下文」的回归钉子。
+func TestStampedTokenNotGated(t *testing.T) {
 	restoreClock := nowForNightWindow
 	nowForNightWindow = func() time.Time { return time.Date(2026, 10, 12, 23, 30, 0, 0, time.Local) }
 	t.Cleanup(func() { nowForNightWindow = restoreClock })
@@ -202,38 +196,33 @@ func TestEnterpriseSessionGateSkipsBehaviorTasks(t *testing.T) {
 	cases := []struct {
 		name string
 		run  func(*Scheduler)
-		// endpoint 是该任务在**个人号**上必然发起的上游路径（对照组判据）。
+		// endpoint 是该任务必然发起的上游路径。
 		endpoint string
-		// gated=true 期望切换会话不发该请求；false 期望照常发（不门控）。
-		gated bool
 	}{
-		{"签到", func(s *Scheduler) { s.RunCheckinNow() }, "/daily-checkin", false},
-		{"活跃上报", func(s *Scheduler) { s.RunActivityNow() }, "/v2/report", true},
-		{"猫猫旅行", func(s *Scheduler) { s.RunTravelNow() }, "/activity/growth/buddy/info", true},
-		{"夜猫子", func(s *Scheduler) { s.RunBlackcatNow() }, "/v2/activity/growth/tasks", true},
-		{"连登管家", func(s *Scheduler) { s.RunStreakBonusNow() }, "/activity/growth/streak", true},
+		{"签到", func(s *Scheduler) { s.RunCheckinNow() }, "/daily-checkin"},
+		{"活跃上报", func(s *Scheduler) { s.RunActivityNow() }, "/v2/report"},
+		{"猫猫旅行", func(s *Scheduler) { s.RunTravelNow() }, "/activity/growth/buddy/info"},
+		{"夜猫子", func(s *Scheduler) { s.RunBlackcatNow() }, "/v2/activity/growth/tasks"},
+		{"连登管家", func(s *Scheduler) { s.RunStreakBonusNow() }, "/activity/growth/streak"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			sSess, rSess := sessionTestScheduler(t, true)
-			c.run(sSess)
-			if c.gated && rSess.has(c.endpoint) {
-				t.Errorf("企业切换会话不应发起 %s，实际请求=%v", c.endpoint, rSess.snapshot())
-			}
-			if !c.gated && !rSess.has(c.endpoint) {
-				t.Errorf("企业切换会话应照常发起 %s（不门控），实际请求=%v", c.endpoint, rSess.snapshot())
+			sStamped, rStamped := sessionTestScheduler(t, true)
+			c.run(sStamped)
+			if !rStamped.has(c.endpoint) {
+				t.Errorf("带 enterprise_switch 章的个人号应照常发起 %s，实际请求=%v", c.endpoint, rStamped.snapshot())
 			}
 
-			sPer, rPer := sessionTestScheduler(t, false)
-			c.run(sPer)
-			if !rPer.has(c.endpoint) {
-				t.Errorf("个人号对照应发起 %s，实际请求=%v", c.endpoint, rPer.snapshot())
+			sPlain, rPlain := sessionTestScheduler(t, false)
+			c.run(sPlain)
+			if !rPlain.has(c.endpoint) {
+				t.Errorf("个人号对照应发起 %s，实际请求=%v", c.endpoint, rPlain.snapshot())
 			}
 		})
 	}
 }
 
-// TestEnterpriseSessionKeepsKeepalive 切换会话照常保活（token 会过期，会话形态
+// TestEnterpriseSessionKeepsKeepalive 带该章的号照常保活（token 会过期，授权流程
 // 不影响选号/刷新能力）。
 func TestEnterpriseSessionKeepsKeepalive(t *testing.T) {
 	s, r := sessionTestScheduler(t, true)

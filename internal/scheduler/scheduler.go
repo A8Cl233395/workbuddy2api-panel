@@ -572,9 +572,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 点亮 growth 连登天数 / 解锁 first_buddy 领养——两者对企业号都是 403
 		// （「growth system is only available for personal users」），即零收益。
 		// 该类「静默无效」最易被忽略（日志无异常），故显式跳过，不给上游多发一次请求。
-		// 企业切换会话（token_source=enterprise_switch）同跳：report 返回 200 却被上游
-		// 静默丢弃（连登不涨），同样是零收益（见 auth.IsEnterpriseSession）。
-		if a.IsEnterpriseSession() {
+		if a.IsEnterprise() {
 			continue
 		}
 		// 注意：活跃上报**不**跳过 global 账号（上游 a190252 同口径）。国际版

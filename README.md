@@ -611,7 +611,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 **企业版照常的能力**：选号派发、保活（token 刷新仍必需——不刷新同样会过期失效）、额度查询。
 
-**企业切换会话（`token_source=enterprise_switch`）**：同属上述「预留功能」，本部署**同样未验证**——实测 20 个号全为 `oneid_login`、`enterpriseId` 全空，故这条判定在现网恒为 `false`，**不改变任何现有行为**（保留它是为了将来接入企业号时行为类任务不再白跑）。浏览器在**企业空间**状态下完成 OAuth 时，签发的 JWT payload 带 `token_source=enterprise_switch`，而账号本身 `enterpriseId` 仍为空——只看 `enterpriseId` 识别不出来，故单列 `auth.Auth.IsEnterpriseSession()`。该形态的上游表现与真企业版**不同**：成长任务列表 / 额度查询 / 领养 Buddy 等**读端点照常**，但 `/v2/report` 行为事件**返回 200 却被静默丢弃**（上游 PR #162 实测：15 个成长任务恒 `0/x`，90s 内逐 15s 回读进度从不跳动），连登 / 签到同样不计分，即「读得见、记不上账」。因此行为类任务（活跃上报 / 连登 / 旅行 / 夜猫子 / 面板成长任务执行）按它跳过并在面板给出重登指引；签到与任务列表扫描不受影响，额度查询 / 选号 / 保活照常（额度仍按 `IsEnterprise` 口径，两者刻意不合并——切换会话不改计费口径）。
+**企业切换会话（`token_source=enterprise_switch`）判定已删除**：JWT 里的 `token_source` 只记本次授权走了哪条流程，**不代表账号是企业形态**——实测两个带该章的**个人版**号，`enterpriseId` 空、`roles` / `resource_access` / `azp` / `aud` 与 `oneid_login` 号逐字段相同（与 WorkBuddy 客户端显示的「个人版」一致）。原先按上游 PR #162 的 A/B 结论把该章当「企业上下文」，跳过行为类任务并在面板提示重登；**实测证伪**：这两个号的成长任务（含只能由 `/v2/report` 行为事件点亮的 `expert_5`、`Library_read`、`Hp_Appearance`）全部 `claimed=true`，行为事件照常计分。故企业形态一律以 `enterpriseId` 为准（`auth.Auth.IsEnterprise()`），不再读 token 声明。
 
 企业额度不在个人「资源包」体系内（`get-user-resource*` 对 `enterpriseId` 账号恒返回空 `Accounts`，面板因此长期显示 0），故额度改走 `POST /v2/billing/meter/get-enterprise-user-usage`：上游 `credit` 是**本周期已用**（与个人口径「剩余」语义相反），`limitNum` 是**分配给该账号的额度**，网关据此换算 `剩余 = limitNum - credit`；`limitNum = -1` 为不限量（面板显示「不限」，且不参与周期分桶）。企业配额按周期重置（`cycleResetTime`），未用完即作废，故周期末会参与 `prefer_expiring` 优先消耗。
 
