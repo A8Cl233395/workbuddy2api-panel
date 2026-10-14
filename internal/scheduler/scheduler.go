@@ -59,6 +59,10 @@ type Config struct {
 	// 反向 import 成环）。返回启动的待办项数与提示文案（0 项 = 无可执行待办）。
 	// 未注入（nil）时 growth 排程静默跳过——测试/未装配面板的部署不需额外判断。
 	GrowthRunner func() (int, string)
+
+	// SweepRunner 补领清扫执行器：main 注入 panel.RunTaskSweepNow。
+	// 未注入（nil）时排程静默跳过（同 GrowthRunner）。
+	SweepRunner func() (int, string)
 	// JitterMinutes 名义整点之后的确定性偏移窗口。0 = 精确整点。
 	JitterMinutes int
 }
@@ -73,15 +77,17 @@ type Scheduler struct {
 	adoptTried map[string]string
 
 	// schedMu 保护排程参数（时点/开关）；Reconfigure 可在运行期热改（面板保存配置时调用）。
-	// rearmSchedule/rearmBalance 是「排程已变，立即重算」通知：Run 与余额刷新循环各自消费，
-	// 分别用独立 channel（同 channel 被两个 select 消费会丢信号）。
+	// rearmSchedule/rearmBalance/rearmSweep 是「排程已变，立即重算」通知：Run 与两个
+	// 分钟级循环各自消费，分别用独立 channel（同 channel 被多个 select 消费会丢信号）。
 	schedMu       sync.Mutex
 	rearmSchedule chan struct{}
 	rearmBalance  chan struct{}
+	rearmSweep    chan struct{}
 
 	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读当前值，
-	// SetBalanceInterval 可任意时刻热改（面板保存配置）。
+	// SetBalanceInterval 可任意时刻热改（面板保存配置）。sweepInterval 同款，用于补领清扫。
 	balanceInterval atomic.Int64
+	sweepInterval   atomic.Int64
 }
 
 // New 构建。
@@ -109,6 +115,7 @@ func New(cfg Config) *Scheduler {
 		adoptTried:    make(map[string]string),
 		rearmSchedule: make(chan struct{}, 1),
 		rearmBalance:  make(chan struct{}, 1),
+		rearmSweep:    make(chan struct{}, 1),
 	}
 }
 
@@ -202,6 +209,13 @@ func (s *Scheduler) GrowthEnabled() bool {
 func (s *Scheduler) SetGrowthRunner(fn func() (int, string)) {
 	s.schedMu.Lock()
 	s.cfg.GrowthRunner = fn
+	s.schedMu.Unlock()
+}
+
+// SetSweepRunner 注入补领清扫执行器（装配期调用一次）。
+func (s *Scheduler) SetSweepRunner(fn func() (int, string)) {
+	s.schedMu.Lock()
+	s.cfg.SweepRunner = fn
 	s.schedMu.Unlock()
 }
 

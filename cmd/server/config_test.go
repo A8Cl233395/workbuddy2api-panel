@@ -623,6 +623,44 @@ func TestWriteDefault(t *testing.T) {
 	}
 }
 
+// 补领清扫（issue #174）：缺省启用 + 15 分钟；显式关闭时 interval 归零（不启动）；
+// minutes<=0 回落 15。
+func TestTaskSweepDefaults(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Schedule.TaskSweepEnabled || c.TaskSweepInterval != 15*time.Minute {
+		t.Errorf("default task sweep: enabled=%v interval=%v", c.Schedule.TaskSweepEnabled, c.TaskSweepInterval)
+	}
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"task_sweep_minutes":3}}`), 0o600)
+	c2, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.TaskSweepInterval != 3*time.Minute {
+		t.Errorf("interval=%v want 3m", c2.TaskSweepInterval)
+	}
+	os.WriteFile(fp, []byte(`{"schedule":{"task_sweep_enabled":false}}`), 0o600)
+	c3, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.TaskSweepInterval != 0 {
+		t.Errorf("disabled interval=%v want 0", c3.TaskSweepInterval)
+	}
+	os.WriteFile(fp, []byte(`{"schedule":{"task_sweep_minutes":-5}}`), 0o600)
+	c4, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c4.TaskSweepInterval != 15*time.Minute {
+		t.Errorf("negative minutes interval=%v want 15m", c4.TaskSweepInterval)
+	}
+}
+
 func TestBalanceRefreshDefaults(t *testing.T) {
 	// 缺省：启用 + 30 分钟
 	c := Default()

@@ -1271,12 +1271,7 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 	emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受)"})
 	if ctx.Err() == nil {
 		if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil && ctx.Err() == nil {
-			var codes []string
-			for _, t := range tasks {
-				if !t.Claimed && !taskProgressReached(&t) && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
-					codes = append(codes, t.TaskCode)
-				}
-			}
+			codes := acceptPendingCodes(tasks)
 			if len(codes) > 0 && ctx.Err() == nil {
 				emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受)"})
 				if ctx.Err() != nil {
@@ -1307,12 +1302,7 @@ func (p *Panel) runAutoAllObserved(ctx context.Context, a *auth.Auth, observe fu
 		emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受-mp)"})
 		if ctx.Err() == nil {
 			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil && ctx.Err() == nil {
-				var mpCodes []string
-				for _, t := range mpTasks {
-					if !t.Claimed && !taskProgressReached(&t) && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
-						mpCodes = append(mpCodes, t.TaskCode)
-					}
-				}
+				mpCodes := acceptPendingCodes(mpTasks)
 				if len(mpCodes) > 0 && ctx.Err() == nil {
 					emit(autoTaskRunEvent{Kind: "phase", TaskCode: "(批量接受-mp)"})
 					if ctx.Err() != nil {
