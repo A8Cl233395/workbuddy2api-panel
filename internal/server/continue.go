@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -161,7 +162,8 @@ func (r *continueReader) frame(payload string) {
 	// —— 于是 (a) 日志把它记成「段无 finish 结束（疑似上游断流）」，(b) 续写段还会白跑
 	// 一次盲重试去撞同一个已被拦的账号。按显式失败处理：如实透传 + 终止续写。
 	if code, msg, ok := upstream.StreamErrorFrame(obj); ok {
-		log.Printf("WARN: [continue] 流内失败帧 code=%d msg=%q → 按显式失败终止（不续写）", code, msg)
+		log.Printf("WARN: [continue] acct=%s 流内失败帧 code=%d msg=%q → 按显式失败终止（不续写）",
+			logfmt.Label(r.acct.UID, r.acct.Nickname), code, msg)
 		r.errSeen = true
 		r.emit(payload)
 		return
@@ -293,9 +295,11 @@ func (r *continueReader) endSegment(sawDone bool) {
 			if rc != nil {
 				rc.Close()
 			}
-			log.Printf("WARN: [continue] seg=%d 续写失败（status=%d err=%v）→ 降级为截断终态", r.seg+1, status, terr)
+			log.Printf("WARN: [continue] acct=%s seg=%d 续写失败（status=%d err=%v）→ 降级为截断终态",
+				logfmt.Label(r.acct.UID, r.acct.Nickname), r.seg+1, status, terr)
 		} else {
-			log.Printf("WARN: [continue] 续写请求体构造失败: %v", err)
+			log.Printf("WARN: [continue] acct=%s 续写请求体构造失败: %v",
+				logfmt.Label(r.acct.UID, r.acct.Nickname), err)
 		}
 	}
 	// 段在没有任何 finish 的情况下以 EOF/读错误结束：疑似上游断流（正常收尾都带
@@ -303,7 +307,8 @@ func (r *continueReader) endSegment(sawDone bool) {
 	// 本层早就知道的事实落到客户端可见的协议字段里（本文件开头那条契约：上层看到
 	// 的永远是「一条完整且恰好一个终态」的流；此前只记日志、没落帧）。
 	if r.cutNoFinish(sawDone) {
-		log.Printf("WARN: [continue] 段无 finish 结束（疑似上游断流，按截断终态降级）")
+		log.Printf("WARN: [continue] acct=%s 段无 finish 结束（疑似上游断流，按截断终态降级）",
+			logfmt.Label(r.acct.UID, r.acct.Nickname))
 		// 有真实输出才补终态：零输出段不能补——否则 StreamHint 的 validEvents 从 0
 		// 变 1，空流本该收敛的 502 观测会被伪装成「有内容的 200」。
 		if r.text.Len() > 0 || r.reason.Len() > 0 || r.toolSeen {

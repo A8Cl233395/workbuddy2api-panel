@@ -65,6 +65,13 @@ var taskKinds = map[string]string{
 // 为什么不直接用上游原文当类型：原文带 requestId / 时间戳，同一类错误会被拆成 N 条，
 // 聚合就失效了。
 func kindOf(line string) (kind, code string, sev string) {
+	// 客户端掐断（Stop / 掉线）不是网关也不是上游故障，但同一原因散在多种文案里
+	// （transport error / upstream parse failed / 续写失败 / rotate backoff aborted）。
+	// 先归到 info，否则这些噪声会把真故障挤出汇总首屏（线上实测 54 条聚合里 37 条是它）。
+	if strings.Contains(line, "context canceled") || strings.Contains(line, "ctx cancelled") ||
+		strings.Contains(line, "context cancelled") {
+		return "客户端中断", "", sevInfo
+	}
 	if m := reUpstream.FindStringSubmatch(line); m != nil {
 		code = m[1]
 		switch m[2] {
@@ -114,6 +121,8 @@ func kindOf(line string) (kind, code string, sev string) {
 			kind, sev = "模型目录拉取异常", sevWarn
 		case strings.Contains(line, "credit floor"):
 			kind, sev = "积分保底让位", sevInfo
+		case strings.Contains(line, "本次大前缀未命中"):
+			kind, sev = "缓存重算（费用）", sevWarn
 		case strings.Contains(line, "rotate backoff aborted"):
 			kind, sev = "轮转退避中止", sevInfo
 		default:
@@ -148,7 +157,8 @@ type LogLine struct {
 }
 
 // AggregateErrors 把日志行聚合成「账号 × (类型, 模型)」统计，按 严重度 → 次数 降序
-// （最该看的排最前）。非 WARN/ERR 行与无法归类的行不参与。
+// （最该看的排最前）。非 WARN/ERR 行不参与；WARN/ERR 但没匹配到规则的行归入
+// 「其他（未归类）」，绝不静默丢弃。
 func AggregateErrors(lines []LogLine) []ErrStat {
 	type key struct{ acct, kind, model string }
 	agg := map[key]*ErrStat{}
@@ -161,7 +171,9 @@ func AggregateErrors(lines []LogLine) []ErrStat {
 		}
 		kind, code, sev := kindOf(txt)
 		if kind == "" {
-			continue
+			// 未归类 ≠ 不重要：新增日志文案时要当场看见它，而不是从汇总里静默消失
+			// （这类漏报最难发现——汇总看着正常，错的只是它少了一行）。
+			kind, sev = "其他（未归类）", sevWarn
 		}
 		acct := ""
 		if m := reAcct.FindStringSubmatch(txt); m != nil {

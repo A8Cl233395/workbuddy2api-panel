@@ -862,7 +862,7 @@ function renderErrorSummary(d) {
     '<td>' + esc(r.last || '—') + '</td>' +
     '<td>' + esc(r.until || '—') + '</td>' +
     '<td class="sample" title="' + esc(r.sample || '') + '">' + esc(r.sample || '') + '</td></tr>'
-  ).join('') : '<tr><td colspan="8" style="color:var(--ink-3)">窗口内没有可归类的 WARN/ERR</td></tr>';
+  ).join('') : '<tr><td colspan="8" style="color:var(--ink-3)">窗口内没有 WARN/ERR</td></tr>';
   $('errNote').textContent = d
     ? '扫描 ' + (d.scanned || 0) + ' 行 · ' + rows.length + ' 类 · 截至 ' + (d.updated_at || '—')
     : '—';
