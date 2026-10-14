@@ -257,9 +257,11 @@ function trangeLabel(id) {
 function rateLimitMeta(row, now) {
   const model = String(row && row.model || '未知模型');
   const kind = String(row && row.kind || 'rate_limit');
-  const resetAt = parseAPITime(row && row.reset_at);
-  const until = parseAPITime(row && row.until);
-  const deadline = resetAt || until;
+  const resetAt = parseAPITime(row && row.reset_at); // 上游文案时间（仅被 soft_rate_max 截断时才与 until 不同）
+  const until = parseAPITime(row && row.until);      // 网关实际解锁时刻（黄框消失即它）
+  // 倒计时与「剩余」一律跟 until：跟上游文案走会出现「显示还剩 50 分钟却已经掉框」，
+  // 再发一次请求黄框又弹回来的错觉（issue #171-2）。模型与档位页的锁池表也是 until 口径。
+  const deadline = until || resetAt;
   const remaining = deadline > now ? Math.round((deadline - now) / 1000) : 0;
   if (kind === 'model_unavailable') {
     return {
@@ -269,12 +271,20 @@ function rateLimitMeta(row, now) {
       title: model + '\n模型当前不可用' + (deadline ? '\n最早重试：' + fmtLocalDateTime(deadline) : ''),
     };
   }
-  let detail = resetAt
-    ? '预计 ' + fmtLocalDateTime(resetAt) + ' 解封' + (remaining ? '（剩余 ' + dur(remaining) + '）' : '')
-    : (until ? '预计 ' + fmtLocalDateTime(until) + ' 恢复（剩余 ' + dur(remaining) + '）' : '预计解封时间未知');
+  let detail;
+  if (resetAt && until && resetAt > until) {
+    // 双口径：上游文案晚于网关封顶解锁时刻——两个都写出来，剩余跟网关口径。
+    detail = '上游称 ' + fmtLocalDateTime(resetAt) + ' 恢复 · 网关 ' + fmtLocalDateTime(until) +
+      ' 起重试' + (remaining ? '（剩余 ' + dur(remaining) + '）' : '');
+  } else if (resetAt) {
+    detail = '预计 ' + fmtLocalDateTime(resetAt) + ' 解封' + (remaining ? '（剩余 ' + dur(remaining) + '）' : '');
+  } else if (until) {
+    detail = '预计 ' + fmtLocalDateTime(until) + ' 恢复' + (remaining ? '（剩余 ' + dur(remaining) + '）' : '');
+  } else {
+    detail = '预计解封时间未知';
+  }
   const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
-  if (until && resetAt && until < resetAt) {
-    detail += ' · 网关最快 ' + dur(Math.max(0, Math.round((until - now) / 1000))) + ' 后重试';
+  if (until && (!resetAt || until !== resetAt)) {
     title.push('网关最早重试：' + fmtLocalDateTime(until));
   }
   return { model, kind, detail, title: title.join('\n') };

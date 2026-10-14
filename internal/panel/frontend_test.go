@@ -367,11 +367,18 @@ vm.runInContext(src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', c
 const now = new Date(2026, 8, 28, 14, 0, 0).getTime();
 const reset = new Date(2026, 8, 28, 16, 0, 0).getTime();
 const until = new Date(2026, 8, 28, 15, 0, 0).getTime();
-const rate = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit', reset_at: new Date(reset).toISOString(), until: new Date(until).toISOString() }, now);
+// capped：上游文案（16:00）晚于网关封顶解锁（15:00）——两个时刻都要写，剩余跟 until。
+const capped = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit', reset_at: new Date(reset).toISOString(), until: new Date(until).toISOString() }, now);
+// onlyUntil：上游没给重置文案，只有网关解锁时刻。
+const onlyUntil = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit', until: new Date(until).toISOString() }, now);
+// equal：上游文案与网关解锁同一时刻（服务端会省略 reset_at，这里也须只显示一个时间）。
+const equal = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit', reset_at: new Date(until).toISOString(), until: new Date(until).toISOString() }, now);
 const unavailable = ctx.rateLimitMeta({ model: 'missing', kind: 'model_unavailable', until: new Date(until).toISOString() }, now);
 const unknown = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit' }, now);
 process.stdout.write(JSON.stringify({
-  rate: rate.detail,
+  capped: capped.detail,
+  onlyUntil: onlyUntil.detail,
+  equal: equal.detail,
   unavailable: unavailable.detail,
   unknown: unknown.detail,
 }));`
@@ -387,7 +394,7 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("rate-limit formatting node test failed: %v\n%s", err, out)
 	}
-	const want = `{"rate":"预计 2026-09-28 16:00 解封（剩余 2时00分） · 网关最快 1时00分 后重试","unavailable":"预计 1时00分 后重试","unknown":"预计解封时间未知"}`
+	const want = `{"capped":"上游称 2026-09-28 16:00 恢复 · 网关 2026-09-28 15:00 起重试（剩余 1时00分）","onlyUntil":"预计 2026-09-28 15:00 恢复（剩余 1时00分）","equal":"预计 2026-09-28 15:00 解封（剩余 1时00分）","unavailable":"预计 1时00分 后重试","unknown":"预计解封时间未知"}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("rate-limit formatting=%s want %s", out, want)
 	}
