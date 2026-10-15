@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -550,8 +551,29 @@ func (p *Pool) AllHardCreditForRealm(realm string) bool {
 // reserveBlocked 报告账号是否因「保留积分」停牌（不再接单）。调用方须持锁。
 // 阈值 0 = 关闭；只拦**已知**余额（creditsTotal > 0，与 Status.CreditsTotal 的
 // 「0 = 未知」同口径）——从未查过余额的账号不受影响，否则全新装机看起来整池不可用。
-func (p *Pool) reserveBlocked(e *entry) bool {
+// modelFree=true（请求模型是免费档）时恒 false：额度耗尽连 x0.00 免费档也会 429 14018，
+// 见底的号要把最后额度留给免费模型（保命模式付费/免费档分流，借鉴 swysgh/workbuddy2api）。
+func (p *Pool) reserveBlocked(e *entry, modelFree bool) bool {
+	if modelFree {
+		return false
+	}
 	return p.reserveCredits > 0 && e.creditsTotal > 0 && e.credits <= p.reserveCredits
+}
+
+// modelFreeOf 报告 (账号域, 模型) 是否免费档：上游目录倍率数值为 0。
+// 与 floorBlockedForRealmModel 同一查表（modelRateOf，含优惠价折算 effectiveModelRate），
+// 两条保号判据对「收费/免费」的口径必然一致。model 为空 / 目录未覆盖 / 倍率异常 →
+// false（保守：当付费处理——免费档豁免宁可不发）。调用方须持锁。
+func (p *Pool) modelFreeOf(e *entry, model string) bool {
+	if model == "" || p.modelRateOf == nil {
+		return false
+	}
+	rate := p.modelRateOf(e.a.Realm(), model)
+	if rate == "" {
+		return false
+	}
+	v, err := strconv.ParseFloat(rate, 64)
+	return err == nil && v == 0
 }
 
 // priorityOf / shareOf 读账号级路由偏好（issue #62），缺省 0 = 未配置。调用方须持锁。
@@ -593,9 +615,10 @@ func (p *Pool) sharePoolLocked(cands []*entry) []*entry {
 }
 
 // selectable 选号判据（调用方须持锁）：健康（model 非空走 6004 模型豁免口径）+
-// 未占满在途 + 未因保留积分停牌。选号入口统一走这里，「不可选」的 policy 只此一处。
+// 未占满在途 + 未因保留积分停牌（免费档豁免，见 modelFreeOf）。选号入口统一走这里，
+// 「不可选」的 policy 只此一处。
 func (p *Pool) selectable(e *entry, now time.Time, model string) bool {
-	if p.inFlightFull(e) || p.reserveBlocked(e) {
+	if p.inFlightFull(e) || p.reserveBlocked(e, p.modelFreeOf(e, model)) {
 		return false
 	}
 	if model != "" {
@@ -626,8 +649,8 @@ func (p *Pool) ServableForRealm(realm string) bool {
 		if p.inFlightFull(e) {
 			continue
 		}
-		if p.reserveBlocked(e) {
-			continue // 保留积分停牌号不接单 → 不算可服务（同 inFlightFull 口径）
+		if p.reserveBlocked(e, false) {
+			continue // 保留积分停牌号不接单 → 不算可服务（同 inFlightFull 口径；探活无模型上下文，按付费口径）
 		}
 		// 存在性语义：账号级 healthy，或处于模型级豁免形态（6004 单模型软冷却——
 		// 对触发模型不可用，对其他模型仍可选）。探活无请求模型上下文，取"存在可服务
@@ -662,7 +685,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 每模型一行（modelCooldowns 内未到期的条目），多模型同时限流全部展示。
 		// 到期判据 = 该模型的独立冷却 until 未过；条件满足才输出，随到期自然消失，
 		// 普通软冷却（无模型级表）/硬冷却不产生台账（零回归）。
-		ReserveBlocked:           p.reserveBlocked(e),
+		ReserveBlocked:           p.reserveBlocked(e, false),
 		RateLimitedModels:        p.rateLimitedModelsLocked(e, now),
 		Realm:                    e.a.Realm(),
 		Enterprise:               e.a.IsEnterprise(),

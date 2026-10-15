@@ -2091,3 +2091,39 @@ func TestResumeIdempotent(t *testing.T) {
 		t.Errorf("Paused 应仍为 false: %+v", st)
 	}
 }
+
+// TestReserveFreeTierExempt 保命模式免费档豁免：额度见底的号对付费模型停牌，
+// 但免费档（目录倍率 x0.00）请求照常可选——额度耗尽连免费档也会 429 14018，
+// 见底的号要把最后额度留给免费模型（借鉴 swysgh/workbuddy2api reserve 分流）。
+func TestReserveFreeTierExempt(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	p.SetModelRateOf(rates(map[string]map[string]string{
+		"cn": {"glm-free": "0.00", "hy4-preview": "0.29"},
+	}))
+	p.Add(&auth.Auth{UID: "low"}) // 唯一账号，余额已到保留线
+	p.SetCredits("low", 5, 100)
+	p.SetReserveCredits(10)
+
+	// 付费模型：停牌（原语义不变）。
+	if a := p.PickExcludingForRealm(nil, "hy4-preview", ""); a != nil {
+		t.Fatalf("免费档豁免不该扩大到付费模型: %+v", a)
+	}
+	// 免费模型：豁免放行（新语义——此前同参数下这里是 nil）。
+	a := p.PickExcludingForRealm(nil, "glm-free", "")
+	if a == nil || a.UID != "low" {
+		t.Fatalf("免费档应放行见底号: got=%v", a)
+	}
+	// Status 展示与探活口径不受豁免影响：账号仍标记停牌（免费档放行是选号时点行为）。
+	if st, _ := p.Status("low"); !st.ReserveBlocked {
+		t.Fatalf("Status.ReserveBlocked 应保持 true（展示全停口径）: %+v", st)
+	}
+	if p.ServableNow() {
+		t.Fatal("ServableNow（探活）应维持全停口径：免费档豁免不改 healthz")
+	}
+	// 目录未覆盖的模型按付费处理（保守），同样停牌。
+	if a := p.PickExcludingForRealm(nil, "not-in-catalog", ""); a != nil {
+		t.Fatalf("目录未覆盖 = 未知倍率，应保守当付费停牌: %+v", a)
+	}
+}
