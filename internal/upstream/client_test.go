@@ -125,6 +125,13 @@ func TestClassify(t *testing.T) {
 		// 非 403 的无信封错误体不进 WAF 分类（WAF 判定绑定 403 形态）。
 		{400, `bad request`, ErrClient},
 		{429, ``, ErrSoftRate},
+		// 6021「queue.full.title」渠道级准入队列满：任意状态码都判 upstream_busy
+		//（防上游换状态码），结构化 code 主判、requestId 含 "6021" 不误伤。
+		{429, `{"code":6021,"msg":"queue.full.title","requestId":"341738971737c911985e5b9e67a4eceb"}`, ErrUpstreamBusy},
+		{500, `{"code":6021,"msg":"queue.full.title"}`, ErrUpstreamBusy},
+		// 防过宽：普通 429（无 queue 语义）仍是账号级软限流。
+		{429, `{"code":1,"msg":"too many requests"}`, ErrSoftRate},
+		{429, `{"requestId":"6021","msg":"rate limit"}`, ErrSoftRate},
 	}
 	for _, c := range cases {
 		if got := Classify(c.status, c.body); got != c.want {

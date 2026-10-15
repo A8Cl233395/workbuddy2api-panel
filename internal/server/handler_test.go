@@ -172,6 +172,47 @@ func TestChatBadParamsFailsFastWithoutPenalty(t *testing.T) {
 	}
 }
 
+// TestChatQueueFullFailsFastWithoutPenalty 上游 429 + code 6021「queue.full.title」
+// 是渠道级准入队列满（上游容量信号），不是账号问题。2026-10-15 实案：按 ErrSoftRate
+// 处置会逐号软冷却，与全冷却兜底互相喂（兜底把冷却号再送上游，再撞 6021 又续订），
+// 几秒的排队放大成整段时间全量 429（本仓当日 18 次全落 soft_rate）。端到端断言：
+// 不轮转（只打一次上游）、直接回 503 + upstream_busy + 上游原文在场、
+// Retry-After 本地兜底 5s、账号零惩罚。
+func TestChatQueueFullFailsFastWithoutPenalty(t *testing.T) {
+	const upstreamBody = `{"code":6021,"msg":"queue.full.title","requestId":"b1bc87ea3a771e835e388328713d47cf"}`
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 429, upstreamBody, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "busy1", AccessToken: "at-busy1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "busy2", AccessToken: "at-busy2", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("busy1", 2000, 0) // 确定性源 r=0 → 先选 busy1
+	p.SetCredits("busy2", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("code=%d body=%s (want 503 fail-fast，非 429)", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "6021") || !strings.Contains(rec.Body.String(), "b1bc87ea") {
+		t.Errorf("503 body 应透传上游原文（含 code+requestId）: %s", rec.Body)
+	}
+	if ra := rec.Header().Get("Retry-After"); ra != "5" {
+		t.Errorf("Retry-After=%q want 5（上游未给重置口径时的本地兜底）", ra)
+	}
+	if calls["Bearer at-busy1"] != 1 || calls["Bearer at-busy2"] != 0 {
+		t.Errorf("calls=%v want 只打一次上游、busy2 号 0 次（不轮转）", calls)
+	}
+	// 账号完好：无冷却、无禁用、无熔断计数、无 errTotal（ErrSoftRate 会冷却+喂 streak）。
+	st, _ := p.Status("busy1")
+	if st.Cooling || st.Disabled || st.ErrTotal != 0 || st.BreakerFails != 0 || st.SoftStreak != 0 {
+		t.Errorf("ErrUpstreamBusy must not penalize account: %+v", st)
+	}
+}
+
 // TestChatModelParamInvalidFailsFastWithoutPenalty 上游 400 + code 11133
 // （model_param_invalid / 「the request parameters were rejected by the model provider」，
 // 实测形态：缺 messages、空 messages、模型不支持图片）→ 请求级错误：不罚账号，

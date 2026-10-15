@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"sync"
@@ -996,6 +997,30 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
+			// 6021「queue.full.title」渠道级容量满载：不罚号不轮转，立即透传上游原文
+			//（503 + upstream_busy，含 requestId）。上游集群排队打满时换任何账号都撞
+			// 同一堵墙——按限流处置会逐号软冷却、与全冷却兜底互相喂成整池停摆
+			//（2026-10-15 实案：18 次全落 soft_rate），且换号把无效请求放大
+			// MaxRotate 倍。客户端按 SDK 退避重试即可；Retry-After 是本地兜底
+			//（上游未给重置口径时按 5s 提示，PR #180 同款）。
+			if kind == upstream.ErrUpstreamBusy {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "upstream capacity is full (queue.full); retry after a short wait"
+				}
+				retryAfter := "5"
+				if uerr != nil && uerr.RetryAfter > 0 && int64(uerr.RetryAfter.Seconds()) > 0 {
+					retryAfter = strconv.FormatInt(int64(uerr.RetryAfter.Seconds()), 10)
+				}
+				w.Header().Set("Retry-After", retryAfter)
+				writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "upstream_busy", msg,
+					h.hintOf(upstream.ErrUpstreamBusy, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusServiceUnavailable
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// 请求级参数拒绝（11101 请求体解析失败 / 11133 模型供应商拒绝参数）：与
 			// 11115 / 图片无效同一哲学——同一 body 换任何账号都是同样的拒绝，轮转只会
 			// 放大无效请求（每号一次上游调用 + rotateBackoff 占用在途名额）。更要紧的
@@ -1230,6 +1255,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrUpstreamBusy:
+			// 6021 渠道级容量满载（防御路径：正常已在轮转循环内 fail-fast，本分支
+			// 只在异常流经末端时兜底）。503 + 可重试语义，上游原文（下方统一透传）
+			// 含 requestId。
+			status = http.StatusServiceUnavailable
+			code = "upstream_busy"
+			msg = "upstream capacity is full (queue.full); retry after a short wait"
 		case upstream.ErrHardCredit:
 			// 14018/402：积分耗尽。429 + insufficient_quota，message 优先上游
 			// 原文（含购买链接；下方统一覆盖）。
@@ -1528,6 +1560,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 	case upstream.ErrImageInvalid:
 		// 图片格式/数据无效：请求的问题不是账号的问题（同一 body 换任何号都会
 		// 得到相同解析错误）。零动作，chatCompletions 已 fail-fast 透传。
+	case upstream.ErrUpstreamBusy:
+		// 6021「queue.full.title」渠道级容量满载：账号余额健康、未限流、session
+		// 未死，换号也撞同一堵墙。零动作（不冷却/不熔断/不 NoteError/不喂连败，
+		// 同 ErrContentBlocked 待遇）——一旦按 ErrSoftRate 罚号，会与全冷却兜底
+		// 互相喂成整池停摆（2026-10-15 实案）。chatCompletions 已 fail-fast 503
+		// 透传原文、终止轮转——该分支只为文档完备。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
 		// 有问题（网关侧不再截断，均为客户端畸形 JSON）。换上任何账号照样 400，
