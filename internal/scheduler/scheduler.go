@@ -293,42 +293,69 @@ const (
 	taskGrowth
 )
 
+// plannedSlot 一类任务的下一个触发时点（零时点 = 未配小时数 = 不跑）。
+type plannedSlot struct {
+	kind taskKind
+	at   time.Time
+}
+
+// enabledSlots 枚举启用任务族的下一个触发时点，是「有哪些任务族」的唯一口径。
+// nextWake（排程）与 missedToday（启动补跑）共用：两处各写一份枚举，正是
+// 「同一件事两套纪律」的温床——新增第七类任务时漏改一处，补跑会静默少一类，
+// 而这类缺口在日志里看不见（sheng-du0521 的「三十号误杀」复盘同源）。
+func (s *Scheduler) enabledSlots(now time.Time) []plannedSlot {
+	type spec struct {
+		off   bool
+		hours []int
+		kind  taskKind
+	}
+	s.schedMu.Lock()
+	specs := []spec{
+		{s.cfg.CheckinDisabled, s.cfg.CheckinHours, taskCheckin},
+		{s.cfg.TravelDisabled, s.cfg.TravelHours, taskTravel},
+		{s.cfg.ActivityDisabled, s.cfg.ActivityHours, taskActivity},
+		{s.cfg.KeepaliveDisabled, s.cfg.KeepaliveHours, taskKeepalive},
+		{s.cfg.BlackcatDisabled, s.cfg.BlackcatHours, taskBlackcat},
+		{s.cfg.GrowthDisabled, s.cfg.GrowthHours, taskGrowth},
+	}
+	jitter := s.cfg.JitterMinutes
+	s.schedMu.Unlock()
+
+	out := make([]plannedSlot, 0, len(specs))
+	for _, sp := range specs {
+		if sp.off {
+			continue
+		}
+		out = append(out, plannedSlot{kind: sp.kind, at: nextFireKind(now, sp.hours, sp.kind, jitter)})
+	}
+	return out
+}
+
+// missedToday 返回「今天的时点已全部过去」的启用任务族（下一次触发已落到别的日子）。
+// 进程停机跨过时点后重启时用它补跑——迟到唤醒补跑只管「进程活着、timer 被睡眠冻结」，
+// 管不到进程本身没在跑。各任务按天幂等（夜猫子等窗口类自带守卫），补一轮无副作用。
+//
+// shortcut: 判据只看「下一次触发是否落在今天」，跨零点窗口（夜猫子 23:00–08:00）
+// 若在 00:00–08:00 之间重启，昨夜那一轮不会被补——真有这种重启再升级判据。
+func (s *Scheduler) missedToday(now time.Time) []taskKind {
+	var out []taskKind
+	for _, sl := range s.enabledSlots(now) {
+		if sl.at.IsZero() {
+			continue // 未配小时数：本来就不跑
+		}
+		if sl.at.Year() != now.Year() || sl.at.YearDay() != now.YearDay() {
+			out = append(out, sl.kind)
+		}
+	}
+	return out
+}
+
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
 // 多类任务若配到同一小时（如签到与旅行都含 9），该时刻多类任务需一并执行。
 // 已显式禁用的任务不进候选（nextFire 对其零值返回零时间，nextWake 再跳过零时点）。
 // 排程参数在 schedMu 下快照，与 Reconfigure 的并发写隔离。
 func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
-	s.schedMu.Lock()
-	checkinHours, keepaliveHours, blackcatHours := s.cfg.CheckinHours, s.cfg.KeepaliveHours, s.cfg.BlackcatHours
-	travelHours, activityHours, growthHours := s.cfg.TravelHours, s.cfg.ActivityHours, s.cfg.GrowthHours
-	checkinOff, keepaliveOff, blackcatOff := s.cfg.CheckinDisabled, s.cfg.KeepaliveDisabled, s.cfg.BlackcatDisabled
-	travelOff, activityOff, growthOff := s.cfg.TravelDisabled, s.cfg.ActivityDisabled, s.cfg.GrowthDisabled
-	jitter := s.cfg.JitterMinutes
-	s.schedMu.Unlock()
-
-	type slot struct {
-		at   time.Time
-		kind taskKind
-	}
-	var slots []slot
-	if !checkinOff {
-		slots = append(slots, slot{nextFireKind(now, checkinHours, taskCheckin, jitter), taskCheckin})
-	}
-	if !travelOff {
-		slots = append(slots, slot{nextFireKind(now, travelHours, taskTravel, jitter), taskTravel})
-	}
-	if !activityOff {
-		slots = append(slots, slot{nextFireKind(now, activityHours, taskActivity, jitter), taskActivity})
-	}
-	if !keepaliveOff {
-		slots = append(slots, slot{nextFireKind(now, keepaliveHours, taskKeepalive, jitter), taskKeepalive})
-	}
-	if !blackcatOff {
-		slots = append(slots, slot{nextFireKind(now, blackcatHours, taskBlackcat, jitter), taskBlackcat})
-	}
-	if !growthOff {
-		slots = append(slots, slot{nextFireKind(now, growthHours, taskGrowth, jitter), taskGrowth})
-	}
+	slots := s.enabledSlots(now)
 	var earliest time.Time
 	for _, sl := range slots {
 		if sl.at.IsZero() {
@@ -427,6 +454,16 @@ func (s *Scheduler) waitSlot(ctx context.Context, next time.Time, step time.Dura
 // Run 主循环，阻塞直到 ctx 取消。
 // Reconfigure 触发 rearmSchedule 时提前唤醒重算（新时点/开关立即生效）。
 func (s *Scheduler) Run(ctx context.Context) {
+	// 启动补跑：进程停机（部署 / 重启 / 崩溃）跨过今天的时点，迟到唤醒补跑救不了
+	// ——它只管进程活着时 timer 被睡眠冻结。这里补一轮：各任务按天幂等，
+	// 窗口类（夜猫子）自带守卫，重复一轮不会打出无意义请求。
+	if missed := s.missedToday(time.Now()); len(missed) > 0 {
+		log.Printf("启动补跑：%v（今天的时点已过）", missed)
+		if !sleepCtx(ctx, wakeupGraceDelay) {
+			return // 开机瞬间网络/DNS 可能未就绪（同 issue #152 的宽限口径）
+		}
+		s.runBatch(ctx, missed)
+	}
 	for {
 		next, kinds := s.nextWake(time.Now())
 		if next.IsZero() {
