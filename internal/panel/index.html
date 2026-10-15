@@ -366,8 +366,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .nav a { white-space: nowrap; }
   .nav .sig .row { white-space: nowrap; }
   body.nav-open { overflow: hidden; }
-  /* 顶栏：允许换行，控件不竖排 */
-  .topbar { flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; }
+  /* 顶栏：允许换行，控件不竖排；右上三钮已图标化，间距收窄 */
+  .topbar { flex-wrap: wrap; gap: 8px 8px; padding: 10px 12px; }
+  .topbar button { padding: 7px 9px; }
   .topbar h2, .topbar .sep, .topbar .meta { white-space: nowrap; }
   .topbar .grow { display: none; }
   .view { padding: 14px 12px 60px; }
@@ -638,9 +639,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button class="icon ghost" id="btnTheme" title="切换明暗（跟随系统 → 浅色 → 深色）" aria-label="切换主题">
         <svg id="icoTheme" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/></svg>
       </button>
-      <button id="btnRefresh">刷新</button>
-      <button id="btnLogout">登出</button>
-      <button class="primary" id="btnAdd">添加账号</button>
+      <button class="icon ghost" id="btnRefresh" title="刷新" aria-label="刷新">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 1.5v3h-3"/></svg>
+      </button>
+      <button class="icon ghost" id="btnLogout" title="登出（清空本机密钥）" aria-label="登出">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6.5 2.5h-3a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3M10 5l3 3-3 3M13 8H6"/></svg>
+      </button>
+      <button class="icon primary" id="btnAdd" title="添加账号" aria-label="添加账号">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 3.5v9M3.5 8h9"/></svg>
+      </button>
     </div>
 
     <!-- 账号池 -->
