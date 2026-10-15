@@ -117,6 +117,7 @@ const ctx = {
   String, Number, Math, Date, Object, Array, JSON, RegExp, console,
   $: id => (id === 'accBody' ? tb : null),
   esc: s => String(s == null ? '' : s), dur: () => '1m', ago: () => '刚刚',
+  remarkName: (uid, html) => html, // 备注是展示层增强，本测试只关心 paused 徽标/按钮
   rateLimitRowsHtml: () => '', formatTokenCount: () => '0', formatLatency: () => '-', formatRate: () => '-',
 };
 vm.createContext(ctx);

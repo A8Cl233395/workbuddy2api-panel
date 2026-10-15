@@ -1464,3 +1464,88 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("到期快照渲染不符:\n got=%s\nwant=%s", out, want)
 	}
 }
+
+// 账号备注：键取 uid 前 8 位（与 renderUsageDim 账号维度、积分扣除表的 uid 前缀同源，
+// 三个表格因此能直接 join）；有备注时备注当主标识、原昵称作浅色虚体跟随；备注来自本机
+// 输入，必须转义后才能拼进 innerHTML。
+func TestAppJSRemarkName(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; remark name test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const escStart = src.indexOf('function esc(');
+const escEnd = src.indexOf('function ago(');
+const start = src.indexOf('function remarkKey(');
+const end = src.indexOf('function storeRemarks(');
+if (escStart < 0 || escEnd < 0) throw new Error('esc helpers not found');
+if (start < 0 || end < 0) throw new Error('remark helpers not found');
+const ctx = { String, RegExp, Number };
+vm.createContext(ctx);
+vm.runInContext(
+  src.slice(escStart, escEnd) + src.slice(start, end) +
+  '\nconst REM = {abcdef12: "JTOL", deadbeef: "<b>x</b>"};' +
+  '\nfunction remarksAll() { return REM; }' +
+  '\nthis.remarkKey=remarkKey; this.remarkName=remarkName;',
+  ctx
+);
+process.stdout.write(JSON.stringify({
+  key: ctx.remarkKey('ABCDEF1234567890'),
+  short: ctx.remarkKey('abc'),
+  empty: ctx.remarkKey(null),
+  remarked: ctx.remarkName('abcdef12', '张三'),
+  plain: ctx.remarkName('zzzzzzzz', '张三'),
+  escaped: ctx.remarkName('deadbeef', 'n'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "remark-name-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("remark name node test failed: %v\n%s", err, out)
+	}
+	const want = `{"key":"ABCDEF12","short":"abc","empty":"","remarked":"JTOL<span class=\"rm-ghost\">张三</span>","plain":"张三","escaped":"&lt;b&gt;x&lt;/b&gt;<span class=\"rm-ghost\">n</span>"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("remark name=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// 备注与折叠的接线齐备性：少一个 id 或漏一个 localStorage 键，表现为「按钮点了没反应」，
+// 而 Go 编译、JS 语法检查、顶层冒烟都发现不了（脚本能正常跑，只是挂不上）。
+// 本仓只取了 PR #178 的备注部分（积分到期折叠未移植：到期提醒已重做为图表式），
+// 故这里只查备注相关 id / 键 / 函数。
+func TestPanelRemarkWiring(t *testing.T) {
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`id="btnRemarks"`, `id="remarkVeil"`, `id="remarkBody"`,
+		`id="btnRemarkSave"`, `id="btnRemarkClear"`, `id="btnRemarkClose"`,
+	} {
+		if !bytes.Contains(html, []byte(want)) {
+			t.Fatalf("index.html 缺少 %s", want)
+		}
+	}
+	js, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"LS_REMARKS = 'wb2api.remarks.v1'",
+		"function remarkKey(",
+		"function remarkName(",
+		"function storeRemarks(",
+	} {
+		if !bytes.Contains(js, []byte(want)) {
+			t.Fatalf("app.js 缺少 %s", want)
+		}
+	}
+}
