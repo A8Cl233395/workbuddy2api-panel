@@ -153,7 +153,8 @@ button.ghost { background: transparent; }
 button.danger { color: var(--bad); }
 button.danger:hover:not(:disabled) { border-color: var(--bad); }
 button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
-button.icon { padding: 7px 9px; }
+/* 图标按钮：flex 居中。默认 inline-block 时 SVG 坐在文字基线上，行盒的下沉空间全落在图标下方（实测上 8 / 下 14.7）。 */
+button.icon { padding: 7px 9px; display: inline-flex; align-items: center; justify-content: center; }
 input, select {
   font: inherit; color: var(--ink); background: var(--surface-2);
   border: 1px solid var(--line); border-radius: 7px; padding: 7px 11px; width: 100%;
