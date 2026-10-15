@@ -67,6 +67,7 @@ func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts 
 	normalizeToolPatterns(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
+	dropReasoningContentParts(obj)
 	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
 	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
 	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；
@@ -331,6 +332,62 @@ func normalizeImageURL(obj map[string]any) {
 			part["image_url"] = map[string]any{"url": imageURL}
 		}
 	}
+}
+
+// dropReasoningContentParts 剔除 chat content 数组里的 reasoning_text / reasoning 片段
+// （吸收上游 PR #159）。
+//
+// 场景：Codex 只走 /v1/responses，第三方中转的 responses→chat 转换器（如 new-api 的
+// openai_responses_to_openai_chat_completions）会把助手历史里的思考片段原样透传进
+// /v1/chat/completions；上游 content 类型白名单不含它，命中即 HTTP 400 code=11101
+// 「unsupported content type at index 0: reasoning_text」。本仓自己的 responses 入站
+// 不产这种片段（客户端回传的 reasoning item 在 convertInputItems 里就丢弃了），这条
+// 是给「链路上游还有别的转换器」兜底。
+//
+// 思考片段只是模型私有推理，下游续写不需要，剔除无副作用：
+//   - 删除 type 为 reasoning_text / reasoning 的片段（TrimSpace 后比较）
+//   - 删除后 content 为空且该消息无 tool_calls → 整条消息一并删除；有 tool_calls 则保留
+//     （留空数组，避免破坏工具调用配对）
+func dropReasoningContentParts(obj map[string]any) {
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return
+	}
+	out := make([]any, 0, len(msgs))
+	for _, rawMsg := range msgs {
+		msg, ok := rawMsg.(map[string]any)
+		if !ok {
+			out = append(out, rawMsg)
+			continue
+		}
+		parts, ok := msg["content"].([]any)
+		if !ok {
+			out = append(out, rawMsg) // 字符串 content（或字段缺失）不受影响
+			continue
+		}
+		kept := make([]any, 0, len(parts))
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				kept = append(kept, rawPart)
+				continue
+			}
+			ptype, _ := part["type"].(string)
+			switch strings.TrimSpace(ptype) {
+			case "reasoning_text", "reasoning":
+				continue
+			}
+			kept = append(kept, rawPart)
+		}
+		if len(kept) == 0 {
+			if _, hasToolCalls := msg["tool_calls"]; !hasToolCalls {
+				continue // 整条只剩思考片段：删掉，否则上游会为这条空 content 报错
+			}
+		}
+		msg["content"] = kept
+		out = append(out, rawMsg)
+	}
+	obj["messages"] = out
 }
 
 // ensureConsoleSystem global realm 兜底 system 注入（吸收 PR #45，防 console 域上游 code 11-128）：

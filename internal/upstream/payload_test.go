@@ -96,6 +96,76 @@ func TestNormalizeRoles(t *testing.T) {
 // 默认发 medium，而 CN 模型常见档位是 low/high/max（无 medium）——旧逻辑取「≤ medium
 // 的最高支持档」会降到 low，比**不携带该字段**时的模型默认档 high 还弱且客户端无感。
 // 同距时优先模型声明的默认档，其次偏高的一档。返回值即日志行里显示的生效档位。
+// 上游 PR #159：chat content 里的思考片段（reasoning_text / reasoning）必须剔除——
+// 上游 content 类型白名单不含它，命中即 400 code=11101（第三方 responses→chat 转换器
+// 会把助手历史里的思考片段原样透传进来）。
+func TestDropReasoningContentParts(t *testing.T) {
+	cases := []struct{ name, body, want string }{
+		{"reasoning_text 剥离、text 保留",
+			`{"messages":[{"role":"assistant","content":[{"type":"reasoning_text","text":"think"},{"type":"text","text":"ans"}]}]}`,
+			`[{"role":"assistant","content":[{"type":"text","text":"ans"}]}]`},
+		{"reasoning 别名同样剥离",
+			`{"messages":[{"role":"assistant","content":[{"type":"reasoning","text":"think"},{"type":"output_text","text":"ans"}]}]}`,
+			`[{"role":"assistant","content":[{"type":"output_text","text":"ans"}]}]`},
+		{"type 前后空白同样命中",
+			`{"messages":[{"role":"assistant","content":[{"type":" reasoning_text ","text":"think"},{"type":"text","text":"ans"}]}]}`,
+			`[{"role":"assistant","content":[{"type":"text","text":"ans"}]}]`},
+		{"剥空且无 tool_calls：整条消息删除",
+			`{"messages":[{"role":"assistant","content":[{"type":"reasoning_text","text":"think"}]},{"role":"user","content":"hi"}]}`,
+			`[{"role":"user","content":"hi"}]`},
+		{"剥空但有 tool_calls：保留空数组 content（不破坏配对）",
+			`{"messages":[{"role":"assistant","content":[{"type":"reasoning_text","text":"t"}],"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]}]}`,
+			`[{"role":"assistant","content":[],"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]}]`},
+		{"字符串 content 不受影响",
+			`{"messages":[{"role":"assistant","content":"plain"},{"role":"user","content":"hi"}]}`,
+			`[{"role":"assistant","content":"plain"},{"role":"user","content":"hi"}]`},
+		{"非对象片段原样保留",
+			`{"messages":[{"role":"assistant","content":["raw",{"type":"text","text":"ans"}]}]}`,
+			`[{"role":"assistant","content":["raw",{"type":"text","text":"ans"}]}]`},
+		{"messages 缺失", `{}`, `null`},
+		{"messages 非数组", `{"messages":"oops"}`, `"oops"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(c.body), &obj); err != nil {
+				t.Fatal(err)
+			}
+			dropReasoningContentParts(obj) // 不得 panic
+			got, err := json.Marshal(obj["messages"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			// 期望值也过一遍序列化：Go 的 map 按键排序输出，直接比字符串会被键序绊住。
+			var want any
+			if err := json.Unmarshal([]byte(c.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			wantOut, err := json.Marshal(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(wantOut) {
+				t.Errorf("messages=%s want %s", got, wantOut)
+			}
+		})
+	}
+}
+
+// 管线必须挂上剥离，且与 sanitize 开关无关（同 normalizeRoles / 工具配对的口径）。
+func TestPrepareBodyDropsReasoningTextParts(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"assistant","content":[{"type":"reasoning_text","text":"think"},{"type":"text","text":"ans"}]}]}`)
+	for _, sanitize := range []bool{false, true} {
+		out := PrepareBodyOpt(body, sanitize)
+		if strings.Contains(string(out), "reasoning_text") {
+			t.Errorf("sanitize=%v 时管线未剥离思考片段: %s", sanitize, out)
+		}
+		if !strings.Contains(string(out), `"ans"`) {
+			t.Errorf("sanitize=%v 时正文被误删: %s", sanitize, out)
+		}
+	}
+}
+
 func TestPrepareBodyOptEffortNearestPick(t *testing.T) {
 	efforts := map[string][]string{
 		"deepseek-v4.1-flash": {"low", "high", "max"}, // 无 medium（线上实测的真实形状）
