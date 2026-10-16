@@ -2,7 +2,8 @@
 // ponytail: 不存会话；客户端每轮带全量 messages。上游 reasoning_content 无 signature，
 // 作为 thinking 块下发展示；客户端回传的 thinking 块丢弃（不触发签名校验）。
 // top_k / cache_control / context_management / betas / count_tokens 上游 chat 没有对应物，丢掉。
-// 内置服务端工具（web_search / code_execution / bash_* …）没有本地执行器，丢掉并在 system 里写明。
+// 服务端工具：web_search 有网关侧执行器（见 searchtool.go，探测→检索→结果注入）；
+// 其余（code_execution / bash_* …）没有执行器，丢掉并在 system 里写明。
 // usage 语义对齐 relaykit：input_tokens 不含缓存读/写（Claude 口径），截断映射 refusal。
 package server
 
@@ -38,10 +39,17 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "read body: "+err.Error())
 		return
 	}
-	chat, err := messagesToChat(body)
+	chat, srv, err := messagesToChat(body)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
+	}
+	// 客户端声明了 web_search 服务端工具 → 网关侧执行（探测→检索→结果注入）；
+	// 注入失败不改语义：searchAugment 返回 nil 时按普通对话继续。
+	if len(srv) > 0 {
+		if augmented := h.searchAugment(r.Context(), chat, srv[0]); augmented != nil {
+			chat = augmented
+		}
 	}
 	var peek struct {
 		Stream bool `json:"stream"`
@@ -62,10 +70,10 @@ func writeAnthropicError(w http.ResponseWriter, status int, typ, msg string) {
 	})
 }
 
-func messagesToChat(src []byte) ([]byte, error) {
+func messagesToChat(src []byte) ([]byte, []serverSearchTool, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(src, &obj); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := map[string]any{}
 	for _, k := range []string{"model", "stream", "temperature", "top_p", "max_tokens"} {
@@ -94,8 +102,9 @@ func messagesToChat(src []byte) ([]byte, error) {
 	}
 	var tools []any
 	var skipped []string
+	var srv []serverSearchTool
 	if raw, ok := obj["tools"].([]any); ok {
-		tools, skipped = anthropicTools(raw)
+		tools, skipped, srv = anthropicTools(raw)
 		if len(tools) > 0 {
 			out["tools"] = tools
 		}
@@ -114,7 +123,11 @@ func messagesToChat(src []byte) ([]byte, error) {
 		msgs = append(msgs, convertAnthropicMessages(in)...)
 	}
 	out["messages"] = msgs
-	return json.Marshal(out)
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, nil, err
+	}
+	return b, srv, nil
 }
 
 // effortFromMessages 把 Messages 的思考档收成上游已有的 reasoning_effort。
@@ -201,10 +214,10 @@ func mapAnthropicToolChoice(m map[string]any) (any, bool) {
 	}
 }
 
-// anthropicTools 只保留客户端自己执行的工具。
+// anthropicTools 分三类：客户端自己执行的工具保留、本网关有执行器的服务端工具交给
+// 探测阶段（见 searchtool.go）、其余服务端工具返回名字供 system 说明。
 // 带 input_schema 的（含 type=custom / 缺 type）原样变成 function。
-// 没有 schema 的内置服务端工具没有本地执行器，返回名字供 system 说明，不发给上游。
-func anthropicTools(tools []any) (out []any, skipped []string) {
+func anthropicTools(tools []any) (out []any, skipped []string, srv []serverSearchTool) {
 	out = make([]any, 0, len(tools))
 	for _, t := range tools {
 		m, ok := t.(map[string]any)
@@ -216,6 +229,10 @@ func anthropicTools(tools []any) (out []any, skipped []string) {
 			continue
 		}
 		if _, ok := m["input_schema"]; !ok {
+			if isWebSearchTool(m) {
+				srv = append(srv, serverSearchTool{Name: asString(m["name"]), MaxUses: int(asNum(m["max_uses"]))})
+				continue
+			}
 			if n := toolLabel(m); n != "" {
 				skipped = append(skipped, n)
 			}
@@ -228,7 +245,20 @@ func anthropicTools(tools []any) (out []any, skipped []string) {
 		fn["parameters"] = m["input_schema"]
 		out = append(out, map[string]any{"type": "function", "function": fn})
 	}
-	return out, skipped
+	return out, skipped, srv
+}
+
+// isWebSearchTool 官方联网检索服务端工具：type 以 web_search 开头
+// （web_search_20250305 / web_search_20250910 …）或名字恰为 web_search。名字为空时
+// 无法构造 function 声明，一律当不可执行。
+func isWebSearchTool(m map[string]any) bool {
+	if asString(m["name"]) == "" {
+		return false
+	}
+	if t := asString(m["type"]); t != "" {
+		return strings.HasPrefix(t, webSearchToolName)
+	}
+	return asString(m["name"]) == webSearchToolName
 }
 
 func toolLabel(m map[string]any) string {

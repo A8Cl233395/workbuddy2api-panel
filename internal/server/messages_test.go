@@ -42,7 +42,7 @@ func TestMessagesToChat(t *testing.T) {
 		"output_config":{"effort":"high","format":{"type":"json_schema","schema":{"type":"object"}}},
 		"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}
 		}`)
-	got, err := messagesToChat(src)
+	got, _, err := messagesToChat(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestMessagesClientShapes(t *testing.T) {
 			]}
 		]
 	}`)
-	got, err := messagesToChat(src)
+	got, _, err := messagesToChat(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,11 @@ func TestMessagesClientShapes(t *testing.T) {
 	if len(msgs) != 5 {
 		t.Fatalf("len=%d %#v", len(msgs), msgs)
 	}
-	if !strings.Contains(msgs[1].(map[string]any)["content"].(string), "bash") || !strings.Contains(msgs[1].(map[string]any)["content"].(string), "web_search") {
+	if !strings.Contains(msgs[1].(map[string]any)["content"].(string), "bash") {
+		t.Fatalf("note=%v", msgs[1])
+	}
+	// web_search 有网关侧执行器（searchtool.go）：不再出现在「不可用」说明里
+	if strings.Contains(msgs[1].(map[string]any)["content"].(string), "web_search") {
 		t.Fatalf("note=%v", msgs[1])
 	}
 	user := msgs[2].(map[string]any)["content"].([]any)
@@ -184,7 +188,7 @@ func TestMessagesClientShapes(t *testing.T) {
 }
 
 func TestEffortFromBudget(t *testing.T) {
-	got, err := messagesToChat([]byte(`{"model":"m","thinking":{"type":"enabled","budget_tokens":16000},"messages":[]}`))
+	got, _, err := messagesToChat([]byte(`{"model":"m","thinking":{"type":"enabled","budget_tokens":16000},"messages":[]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +199,7 @@ func TestEffortFromBudget(t *testing.T) {
 	if obj["reasoning_effort"] != "high" {
 		t.Fatalf("effort=%v", obj["reasoning_effort"])
 	}
-	got, err = messagesToChat([]byte(`{"model":"m","thinking":{"type":"disabled"},"output_config":{"effort":"low"},"messages":[]}`))
+	got, _, err = messagesToChat([]byte(`{"model":"m","thinking":{"type":"disabled"},"output_config":{"effort":"low"},"messages":[]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +502,7 @@ func TestMessagesAuthXAPIKey(t *testing.T) {
 }
 
 func TestMessagesInvalidJSON(t *testing.T) {
-	_, err := messagesToChat([]byte(`{`))
+	_, _, err := messagesToChat([]byte(`{`))
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -542,7 +546,7 @@ func TestMessagesEndpointNonStreamError(t *testing.T) {
 func TestAnthropicToolResultImagesMoveToUserMessage(t *testing.T) {
 	msgsFor := func(messages string) []any {
 		t.Helper()
-		got, err := messagesToChat([]byte(`{"model":"m","max_tokens":16,"messages":` + messages + `}`))
+		got, _, err := messagesToChat([]byte(`{"model":"m","max_tokens":16,"messages":` + messages + `}`))
 		if err != nil {
 			t.Fatal(err)
 		}
