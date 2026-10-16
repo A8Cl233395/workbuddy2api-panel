@@ -114,6 +114,40 @@ func testPoolWith(auths ...*auth.Auth) *pool.Pool {
 	return p
 }
 
+// TestChatToolMismatchFailsFastWithoutPenalty 上游 11148（tool calls and tool results
+// do not match，上游明示「直接重试无效，请新建任务」）是**请求内容**级错误：同一 body
+// 换任何账号都是同样的 400。此前落 ErrClient → 全池轮转一遍（每个健康号白记一笔连败）
+// + 末端 503「账号不可用」，与账号健康无关（借鉴 MOONKEY0510/workbuddy_api cd35e5c）。
+// 端到端断言：只打一次上游、直接回 400 + upstream 原文、账号零惩罚。
+func TestChatToolMismatchFailsFastWithoutPenalty(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 400, `{"code":11148,"msg":"tool calls and tool results do not match","requestId":"aaaabbbbccccdddd"}`, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "tm1", AccessToken: "at-tm1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "tm2", AccessToken: "at-tm2", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+
+	if rec.Code != 400 {
+		t.Fatalf("code=%d body=%s (want 400 fail-fast，非 503)", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "11148") {
+		t.Errorf("400 body 应透传上游原文: %s", rec.Body)
+	}
+	if calls["Bearer at-tm1"] != 1 || calls["Bearer at-tm2"] != 0 {
+		t.Errorf("calls=%v want 只打一次上游（不轮转）", calls)
+	}
+	st, _ := p.Status("tm1")
+	if st.Cooling || st.Disabled || st.ErrTotal != 0 || st.BreakerFails != 0 || st.ConsecutiveFails != 0 {
+		t.Errorf("ErrToolMismatch must not penalize account: %+v", st)
+	}
+}
+
 // TestChatClientAbortNoPenalty 客户端已断连（ctx 取消）时的传输层失败不得记到账号头上。
 //
 // 回归背景：断连后 r.Context() 已取消，传输层分支仍无条件 NoteFailures——每断一次就

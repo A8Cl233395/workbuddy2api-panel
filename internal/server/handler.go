@@ -1030,6 +1030,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
+			// 11148「tool calls and tool results do not match」：请求内容级配对断裂。
+			// 上游明示「直接重试无效，请新建任务」——同一 body 换任何账号都撞同一处，
+			// 轮转只会把整池健康号逐个白打一遍（此前还按 ErrClient 喂连败降权），
+			// 客户端等完全池后拿到 503「账号不可用」，与账号健康毫无关系。
+			// fail-fast 400 透传上游原文 + hint 指向「开新会话」，不罚号不轮转。
+			// shortcut: 未做「剥离工具历史后自愈重试一次」，Codex 坏会话仍需用户新建会话；
+			// 补自愈时在 fail() 前重写 body 再走一次同账号尝试即可。
+			if kind == upstream.ErrToolMismatch {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "upstream rejected the request: tool calls and tool results do not match"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "tool_call_mismatch", msg,
+					h.hintOf(upstream.ErrToolMismatch, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// 请求级参数拒绝（11101 请求体解析失败 / 11133 模型供应商拒绝参数）：与
 			// 11115 / 图片无效同一哲学——同一 body 换任何账号都是同样的拒绝，轮转只会
 			// 放大无效请求（每号一次上游调用 + rotateBackoff 占用在途名额）。更要紧的
@@ -1577,6 +1597,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 同 ErrContentBlocked 待遇）——一旦按 ErrSoftRate 罚号，会与全冷却兜底
 		// 互相喂成整池停摆（2026-10-15 实案）。chatCompletions 已 fail-fast 503
 		// 透传原文、终止轮转——该分支只为文档完备。
+	case upstream.ErrToolMismatch:
+		// 11148 工具配对断裂：请求内容的问题（会话历史里的 tool_calls / tool 结果对不上），
+		// 同一 body 换任何账号都是同样的拒绝。零动作（不冷却/不熔断/不 NoteError/不喂
+		// 连败，同 ErrBadParams 待遇）；chatCompletions 已 fail-fast 400 透传原文、
+		// 终止轮转——该分支只为文档完备。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
 		// 有问题（网关侧不再截断，均为客户端畸形 JSON）。换上任何账号照样 400，

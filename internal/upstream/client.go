@@ -44,6 +44,7 @@ const (
 	ErrModelParamInvalid                // 11133「参数被模型供应商拒绝」（缺/空 messages、模型不支持图片等）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
 	ErrClient                           // 其他 4xx / 业务错误
 	ErrUpstreamBusy                     // 6021「queue.full.title」渠道级准入队列满 → 上游容量信号：不罚号、不轮转，末端 503 透传原文
+	ErrToolMismatch                     // 11148「tool calls and tool results do not match」 → 请求内容级配对断裂：不罚号、不轮转，末端 400 透传原文
 )
 
 func (k ErrKind) String() string {
@@ -78,6 +79,8 @@ func (k ErrKind) String() string {
 		return "client"
 	case ErrUpstreamBusy:
 		return "upstream_busy"
+	case ErrToolMismatch:
+		return "tool_mismatch"
 	default:
 		return "none"
 	}
@@ -589,6 +592,15 @@ func Classify(status int, body string) ErrKind {
 				return ErrPromptTooLong
 			}
 		}
+	}
+	// 11148「tool calls and tool results do not match」：**请求内容**级配对断裂（上游
+	// 明示「直接重试无效，请新建任务」）。不在此分流会落 ErrClient → 全池轮转一遍
+	// （每个健康号白记一笔连败）+ 末端 503，而同一 body 换任何账号都是同样的 400。
+	// 判在状态码兜底（404/5xx）之前——上游可能套 5xx 外壳；codeMarker 走空白容差，
+	// 文案留中英兜底。
+	if codeMarker(lower, "11148") || strings.Contains(lower, "tool results do not match") ||
+		strings.Contains(body, "工具调用与工具结果不匹配") {
+		return ErrToolMismatch
 	}
 	if status == http.StatusNotFound {
 		return ErrNotFound

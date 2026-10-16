@@ -64,6 +64,11 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 6021 queue.full：渠道级容量满载。措辞明确「不是账号问题、换号无意义」，
 		// 指引客户端短等待后重试（SDK 指数退避天然适配）。
 		return "upstream admission queue is full (channel-level capacity, not an account problem); retry after a short wait"
+	case ErrToolMismatch:
+		// 11148 配对断裂：请求内容（会话历史里的 tool_calls / tool 结果）本身对不上，
+		// 上游明示「直接重试无效，请新建任务」。措辞指向「开新会话」而不是「换个账号
+		// 重试」——换号/重试都必然同样失败。
+		return "request tool-call history is broken (call/result mismatch); upstream rejects this request as-is — start a new conversation instead of retrying"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
 	case ErrContentBlocked:

@@ -132,6 +132,14 @@ func TestClassify(t *testing.T) {
 		// 防过宽：普通 429（无 queue 语义）仍是账号级软限流。
 		{429, `{"code":1,"msg":"too many requests"}`, ErrSoftRate},
 		{429, `{"requestId":"6021","msg":"rate limit"}`, ErrSoftRate},
+		// 11148 工具配对断裂：请求内容级（上游「直接重试无效，请新建任务」），
+		// 换号/重试必然同样失败——不得落 ErrClient 白轮转全池。
+		{400, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrToolMismatch},
+		// 5xx 外壳同样认（上游对同因有时换状态码）。
+		{500, `{"code": 11148,"msg":"tool calls and tool results do not match"}`, ErrToolMismatch},
+		// 防过宽：相邻错误码不误伤（11140 账号级风控、11115 超长各有归属）。
+		{400, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
+		{400, `{"code":11115,"msg":"prompt is too long"}`, ErrPromptTooLong},
 	}
 	for _, c := range cases {
 		if got := Classify(c.status, c.body); got != c.want {
