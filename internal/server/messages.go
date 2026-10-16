@@ -45,10 +45,11 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 客户端声明了 web_search 服务端工具 → 网关侧执行（探测→检索→结果注入）；
-	// 注入失败不改语义：searchAugment 返回 nil 时按普通对话继续。
+	// 注入失败不改语义：searchAugment 返回 nil body 时按普通对话继续。
+	var prelude []any
 	if len(srv) > 0 {
-		if augmented := h.searchAugment(r.Context(), chat, srv[0]); augmented != nil {
-			chat = augmented
+		if augmented, blocks := h.searchAugment(r.Context(), chat, srv[0]); augmented != nil {
+			chat, prelude = augmented, blocks
 		}
 	}
 	var peek struct {
@@ -58,7 +59,7 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	r2 := r.Clone(r.Context())
 	r2.Body = io.NopCloser(bytes.NewReader(chat))
 	r2.ContentLength = int64(len(chat))
-	rw := &messagesWriter{ResponseWriter: w, stream: peek.Stream}
+	rw := &messagesWriter{ResponseWriter: w, stream: peek.Stream, prelude: prelude}
 	defer rw.finish()
 	h.chatCompletions(rw, r2)
 }
@@ -702,6 +703,9 @@ type messagesWriter struct {
 	hdrSent bool
 	rest    []byte
 	body    []byte
+	// prelude 服务端工具块（server_tool_use / web_search_tool_result，见 searchtool.go）：
+	// 只能在 message_start 之后、正文之前落地，且占用正文之前的内容块下标。
+	prelude []any
 	x       anthState
 }
 
@@ -789,7 +793,14 @@ func (w *messagesWriter) flushJSON() {
 		_, _ = w.ResponseWriter.Write(anthropicErrorBody(status, obj))
 		return
 	}
-	raw, err := json.Marshal(chatCompletionToMessage(obj))
+	msg := chatCompletionToMessage(obj)
+	if len(w.prelude) > 0 {
+		if c, ok := msg["content"].([]any); ok {
+			msg["content"] = append(append([]any{}, w.prelude...), c...)
+			w.prelude = nil
+		}
+	}
+	raw, err := json.Marshal(msg)
 	if err != nil {
 		w.ResponseWriter.WriteHeader(status)
 		_, _ = w.ResponseWriter.Write(w.body)
@@ -904,7 +915,7 @@ func (w *messagesWriter) ensureStart(obj map[string]any) error {
 		w.x.model, _ = obj["model"].(string)
 	}
 	// ponytail: usage 在最后一帧才到，message_start 的 input_tokens 固定 0；真实数在 message_delta。
-	return w.emit("message_start", map[string]any{
+	err := w.emit("message_start", map[string]any{
 		"message": map[string]any{
 			"id":            msgID(w.x.id),
 			"type":          "message",
@@ -916,6 +927,27 @@ func (w *messagesWriter) ensureStart(obj map[string]any) error {
 			"usage":         map[string]any{"input_tokens": 0, "output_tokens": 0},
 		},
 	})
+	if err != nil {
+		return err
+	}
+	return w.emitPrelude()
+}
+
+// emitPrelude 落地服务端工具块：每次都自带 start+stop（input/结果已是完整的，无需 delta 帧），
+// 各自占用一个内容块下标。只发一次（发完清空）。
+func (w *messagesWriter) emitPrelude() error {
+	for _, block := range w.prelude {
+		idx := w.x.next
+		w.x.next++
+		if err := w.emit("content_block_start", map[string]any{"index": idx, "content_block": block}); err != nil {
+			return err
+		}
+		if err := w.emit("content_block_stop", map[string]any{"index": idx}); err != nil {
+			return err
+		}
+	}
+	w.prelude = nil
+	return nil
 }
 
 func (w *messagesWriter) ensureThinking() error {

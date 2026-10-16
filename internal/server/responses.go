@@ -30,10 +30,16 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
-	chat, meta, err := responsesToChat(body)
+	chat, meta, srv, err := responsesToChat(body)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
+	}
+	// 声明了托管 web_search → 网关侧执行（探测→检索→结果注入，同 /v1/messages）。
+	if len(srv) > 0 {
+		if augmented, _ := h.searchAugment(r.Context(), chat, srv[0]); augmented != nil {
+			chat = augmented
+		}
 	}
 	var peek struct {
 		Stream bool `json:"stream"`
@@ -47,10 +53,10 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	h.chatCompletions(rw, r2)
 }
 
-func responsesToChat(src []byte) ([]byte, *responsesMeta, error) {
+func responsesToChat(src []byte) ([]byte, *responsesMeta, []serverSearchTool, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(src, &obj); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	out := map[string]any{}
 	meta := &responsesMeta{}
@@ -73,9 +79,14 @@ func responsesToChat(src []byte) ([]byte, *responsesMeta, error) {
 	if v, ok := obj["reasoning_effort"]; ok {
 		out["reasoning_effort"] = v
 	}
+	var srv []serverSearchTool
 	if tools, ok := obj["tools"].([]any); ok {
 		chatTools, custom, nsMap, alias := convertTools(tools)
-		out["tools"] = chatTools
+		// 托管 web_search 由网关执行，不进上游 tools（见 splitHostedSearch）。
+		chatTools, srv = splitHostedSearch(chatTools)
+		if len(chatTools) > 0 {
+			out["tools"] = chatTools
+		}
 		meta.customTools, meta.nsMap, meta.alias = custom, nsMap, alias
 	}
 	// tool_choice 也要与出站工具名对齐：重名改名过的工具，客户端仍按原名点名。
@@ -97,9 +108,34 @@ func responsesToChat(src []byte) ([]byte, *responsesMeta, error) {
 	out["messages"] = msgs
 	b, err := json.Marshal(out)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return b, meta, nil
+	return b, meta, srv, nil
+}
+
+// splitHostedSearch 分离 Responses 的托管联网工具，返回留在上游 tools 里的部分。
+//
+// Codex 开 tools.web_search 时声明的是托管工具 {"type":"web_search"}（或
+// web_search_preview 变体），没有 name/parameters。上游收下不报错（实测 200）但也
+// 不会执行——留着就是空转；本网关有执行器（searchtool.go），故摘出来自己跑，
+// 由 searchAugment 拼一份 function 声明送给模型。其余托管类型（code_interpreter 等）
+// 原样保留：上游对未知 type 不报错，改它没有证据支撑。
+func splitHostedSearch(tools []any) ([]any, []serverSearchTool) {
+	kept := make([]any, 0, len(tools))
+	var srv []serverSearchTool
+	for _, t := range tools {
+		m, ok := t.(map[string]any)
+		if !ok || asString(m["name"]) != "" {
+			kept = append(kept, t)
+			continue
+		}
+		if !strings.HasPrefix(asString(m["type"]), webSearchToolName) {
+			kept = append(kept, t)
+			continue
+		}
+		srv = append(srv, serverSearchTool{Name: webSearchToolName, MaxUses: int(asNum(m["max_uses"]))})
+	}
+	return kept, srv
 }
 
 // responsesMeta 请求阶段提取、回程需要的工具语义（PR #109 的两条 Codex 协议细节）：

@@ -31,6 +31,7 @@ import (
 	"strings"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -67,16 +68,17 @@ func webSearchFunction(name string) map[string]any {
 	}}
 }
 
-// searchAugment 探测→检索→注入。返回 nil 表示没有可注入的内容（探测失败、模型没用
-// 搜索、检索全部失败），调用方按普通对话继续。
-func (h *Handler) searchAugment(ctx context.Context, chat []byte, tool serverSearchTool) []byte {
+// searchAugment 探测→检索→注入。返回 nil body 表示没有可注入的内容（探测失败、模型没用
+// 搜索、检索全部失败），调用方按普通对话继续；prelude 是给 Anthropic 客户端回报的
+// server_tool_use / web_search_tool_result 块（Responses 侧暂不合成等价 output item）。
+func (h *Handler) searchAugment(ctx context.Context, chat []byte, tool serverSearchTool) ([]byte, []any) {
 	var obj map[string]any
 	if err := json.Unmarshal(chat, &obj); err != nil {
-		return nil
+		return nil, nil
 	}
 	msgs, _ := obj["messages"].([]any)
 	if len(msgs) == 0 {
-		return nil
+		return nil, nil
 	}
 	model, _ := obj["model"].(string)
 	// realm 前缀是网关侧路由协议：出站与选号一律用裸模型名（与 chat 路径同一口径，
@@ -94,6 +96,7 @@ func (h *Handler) searchAugment(ctx context.Context, chat []byte, tool serverSea
 	probeMsgs := append([]any{}, msgs...)
 
 	var items []string
+	var done []searchDone
 	for uses := 0; uses < limit; {
 		probe := map[string]any{"model": bare, "messages": probeMsgs, "tools": probeTools, "stream": false}
 		for _, k := range []string{"temperature", "top_p", "max_tokens", "reasoning_effort", "tool_choice"} {
@@ -103,12 +106,12 @@ func (h *Handler) searchAugment(ctx context.Context, chat []byte, tool serverSea
 		}
 		pb, err := json.Marshal(probe)
 		if err != nil {
-			return nil
+			return nil, nil
 		}
 		msg, err := h.probeOnce(ctx, realm, bare, pb)
 		if err != nil {
 			log.Printf("WARN: [messages] web_search 探测失败，降级为普通对话: %v", err)
-			return nil
+			return nil, nil
 		}
 		calls := webSearchCalls(msg, tool.Name)
 		if len(calls) == 0 {
@@ -120,19 +123,22 @@ func (h *Handler) searchAugment(ctx context.Context, chat []byte, tool serverSea
 				break
 			}
 			uses++
-			text, ok := h.searchText(ctx, realm, bare, c.Query)
+			text, results, ok := h.searchText(ctx, realm, bare, c.Query)
 			if !ok {
 				// 检索失败：把失败如实告诉模型，别让它以为「网上没有」
 				text = "检索「" + c.Query + "」失败（上游检索接口不可用）。"
 			}
 			items = append(items, text)
+			if ok {
+				done = append(done, searchDone{Query: c.Query, Results: results})
+			}
 			probeMsgs = append(probeMsgs, map[string]any{
 				"role": "tool", "tool_call_id": c.ID, "content": text,
 			})
 		}
 	}
 	if len(items) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := map[string]any{}
 	for k, v := range obj {
@@ -144,9 +150,40 @@ func (h *Handler) searchAugment(ctx context.Context, chat []byte, tool serverSea
 	})
 	b, err := json.Marshal(out)
 	if err != nil {
+		return nil, nil
+	}
+	return b, searchPrelude(tool.Name, done)
+}
+
+// searchDone 一次成功的检索（回报给客户端用）。
+type searchDone struct {
+	Query   string
+	Results []upstream.SearchResult
+}
+
+// searchPrelude 组装 Anthropic 的服务端工具块：每次检索一对
+// server_tool_use（模型发起）+ web_search_tool_result（网关执行结果）。
+// 只在真检索成功时回报——失败的检索没有结果块可发（客户端可见的失败仍走文本）。
+func searchPrelude(name string, done []searchDone) []any {
+	if len(done) == 0 {
 		return nil
 	}
-	return b
+	out := make([]any, 0, 2*len(done))
+	for _, d := range done {
+		id := "srvtoolu_" + session.NewMessageID()
+		out = append(out, map[string]any{
+			"type": "server_tool_use", "id": id, "name": name,
+			"input": map[string]any{"query": d.Query},
+		})
+		content := make([]any, 0, len(d.Results))
+		for _, r := range d.Results {
+			content = append(content, map[string]any{"type": "web_search_result", "title": r.Title, "url": r.URL})
+		}
+		out = append(out, map[string]any{
+			"type": "web_search_tool_result", "tool_use_id": id, "content": content,
+		})
+	}
+	return out
 }
 
 // searchCall 模型要的一次检索。
@@ -240,8 +277,8 @@ func firstChoiceMessage(obj map[string]any) map[string]any {
 	return m
 }
 
-// searchText 执行一次检索并返回注入用的文本；失败返回 false（调用方降级）。
-func (h *Handler) searchText(ctx context.Context, realm, model, query string) (string, bool) {
+// searchText 执行一次检索，返回注入用的文本与结构化结果；失败返回 false（调用方降级）。
+func (h *Handler) searchText(ctx context.Context, realm, model, query string) (string, []upstream.SearchResult, bool) {
 	tried := map[string]bool{}
 	for i := 0; i < webSearchPickTries; i++ {
 		a := h.cfg.Pool.PickExcludingForRealm(tried, model, realm)
@@ -262,9 +299,9 @@ func (h *Handler) searchText(ctx context.Context, realm, model, query string) (s
 		if err := json.Unmarshal(raw, &rs); err != nil || len(rs.Results) == 0 {
 			continue
 		}
-		return formatSearchResults(rs), true
+		return formatSearchResults(rs), rs.Results, true
 	}
-	return "", false
+	return "", nil, false
 }
 
 // formatSearchResults 检索结果 → 注入文本（URL 必带：模型要靠它引用来源）。

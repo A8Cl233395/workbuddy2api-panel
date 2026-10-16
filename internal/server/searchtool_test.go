@@ -126,12 +126,85 @@ func TestMessagesWebSearchToolRuns(t *testing.T) {
 	if bodyHasTool(final, "web_search") {
 		t.Fatalf("最终调用仍带 web_search 声明: %v", final["tools"])
 	}
-	// ⑦ 客户端看到的是正常流，且没有 web_search 的 tool_use 泄漏
-	if !strings.Contains(rec.Body.String(), "message_stop") {
-		t.Fatalf("非正常 Anthropic 流: %s", rec.Body.String())
+	// ⑦ 客户端看到正常 Anthropic 流；检索过程以 server_tool_use + web_search_tool_result 回报
+	blocks, body := sseBlocks(t, rec.Body.String())
+	if !strings.Contains(body, "message_stop") {
+		t.Fatalf("非正常 Anthropic 流: %s", body)
 	}
-	if strings.Contains(rec.Body.String(), `"name":"web_search"`) {
-		t.Fatalf("服务端工具泄漏给客户端: %s", rec.Body.String())
+	var use, res map[string]any
+	for _, b := range blocks {
+		switch asString(b["type"]) {
+		case "server_tool_use":
+			use = b
+		case "web_search_tool_result":
+			res = b
+		}
+	}
+	if use == nil || res == nil {
+		t.Fatalf("缺服务端工具块（%v）: %s", blocks, body)
+	}
+	if asString(use["name"]) != "web_search" || asString(use["id"]) != asString(res["tool_use_id"]) {
+		t.Fatalf("server_tool_use 与结果块未配对: %v / %v", use, res)
+	}
+	if !strings.Contains(body, "http://scjdglj.gxzf.example/1.shtml") {
+		t.Fatal("结果块里没有来源 URL")
+	}
+	// 服务端工具**不得**降级成客户端可执行的 tool_use（Claude Code 会去找执行器执行它）
+	if strings.Contains(body, `"type":"tool_use"`) {
+		t.Fatalf("服务端工具被当成客户端工具下发: %s", body)
+	}
+}
+
+// sseBlocks 解析 Anthropic SSE 里的 content_block_start 块与全文（顺序即下标顺序）。
+func sseBlocks(t *testing.T, body string) ([]map[string]any, string) {
+	t.Helper()
+	var blocks []map[string]any
+	for _, ev := range strings.Split(body, "\n\n") {
+		payload, ok := strings.CutPrefix(strings.TrimSpace(ev), "event: content_block_start")
+		if !ok {
+			continue
+		}
+		i := strings.Index(payload, "data: ")
+		if i < 0 {
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(payload[i+6:]), &obj); err != nil {
+			t.Fatalf("解析 content_block_start 失败: %v (%s)", err, payload)
+		}
+		if b, ok := obj["content_block"].(map[string]any); ok {
+			blocks = append(blocks, b)
+		}
+	}
+	return blocks, body
+}
+
+// TestMessagesWebSearchBlocksNonStream 非流式：服务端工具块排在正文之前，且都是完整块。
+func TestMessagesWebSearchBlocksNonStream(t *testing.T) {
+	f := &searchToolFake{}
+	h := newSearchToolHandler(f)
+	body := `{"model":"glm-5.2","max_tokens":1024,"stream":false,` +
+		`"tools":[{"type":"web_search_20250305","name":"web_search"}],` +
+		`"messages":[{"role":"user","content":"玉林的电梯维保新规是什么？"}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var msg struct {
+		Content []map[string]any `json:"content"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("非流式响应不是 JSON: %v (%s)", err, rec.Body.String())
+	}
+	if len(msg.Content) < 3 {
+		t.Fatalf("块数不足（want 服务端工具对 + 正文）: %s", rec.Body.String())
+	}
+	if asString(msg.Content[0]["type"]) != "server_tool_use" || asString(msg.Content[1]["type"]) != "web_search_tool_result" {
+		t.Fatalf("服务端工具块未排在正文之前: %v", msg.Content)
+	}
+	if asString(msg.Content[2]["type"]) != "text" {
+		t.Fatalf("正文块位置不符: %v", msg.Content[2])
 	}
 }
 
@@ -226,4 +299,72 @@ func lastMessage(obj map[string]any) string {
 	}
 	m, _ := msgs[len(msgs)-1].(map[string]any)
 	return asString(m["content"])
+}
+
+// TestResponsesHostedWebSearchExecutes Codex 的托管联网：声明 {"type":"web_search"}
+// → 网关侧执行检索（用模型自己写的检索词）→ 结果注入 → 正常 Responses 流。
+func TestResponsesHostedWebSearchExecutes(t *testing.T) {
+	f := &searchToolFake{}
+	h := newSearchToolHandler(f)
+	body := `{"model":"glm-5.2","stream":true,"input":"玉林的电梯维保新规是什么？",` +
+		`"tools":[{"type":"web_search"}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if f.chatCalls != 3 {
+		t.Fatalf("chat 调用 %d 次，want 3（探测×2 + 最终答案）", f.chatCalls)
+	}
+	if len(f.searchQ) != 1 || f.searchQ[0] != "玉林 电梯 维保" {
+		t.Fatalf("检索词 %v（应为模型写的词）", f.searchQ)
+	}
+	// 托管工具不得原样留在上游 tools 里：上游收下不报错但也不会执行（空转）。
+	var final map[string]any
+	_ = decodeJSON(f.chatBodies[len(f.chatBodies)-1], &final)
+	if bodyHasTool(final, "web_search") {
+		t.Fatalf("托管 web_search 仍被透传给上游: %v", final["tools"])
+	}
+	if !strings.Contains(lastMessage(final), "http://scjdglj.gxzf.example/1.shtml") {
+		t.Fatalf("未注入检索结果: %v", lastMessage(final))
+	}
+	if !strings.Contains(rec.Body.String(), "response.completed") {
+		t.Fatalf("非正常 Responses 流: %s", rec.Body.String())
+	}
+}
+
+// TestResponsesWithoutHostedSearchSkipsProbe 没声明托管搜索时零额外开销（含非托管工具）。
+func TestResponsesWithoutHostedSearchSkipsProbe(t *testing.T) {
+	f := &searchToolFake{}
+	h := newSearchToolHandler(f)
+	body := `{"model":"glm-5.2","stream":true,"input":"hi","tools":[{"type":"function",` +
+		`"name":"f","parameters":{"type":"object"}}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if f.chatCalls != 1 || len(f.searchQ) != 0 {
+		t.Fatalf("不该探测/检索: chatCalls=%d searchQ=%v", f.chatCalls, f.searchQ)
+	}
+}
+
+// TestSplitHostedSearch 只摘托管检索（无 name 的 web_search*），其余原样留下。
+func TestSplitHostedSearch(t *testing.T) {
+	kept, srv := splitHostedSearch([]any{
+		map[string]any{"type": "web_search"},
+		map[string]any{"type": "web_search_preview", "max_uses": float64(2)},
+		map[string]any{"type": "web_search", "name": "web_search"}, // 带 name：客户端自己的函数工具
+		map[string]any{"type": "code_interpreter"},
+		map[string]any{"type": "function", "name": "f"},
+	})
+	if len(srv) != 2 || srv[0].Name != webSearchToolName || srv[0].MaxUses != 0 || srv[1].MaxUses != 2 {
+		t.Fatalf("srv=%v", srv)
+	}
+	if len(kept) != 3 {
+		t.Fatalf("kept=%v", kept)
+	}
+	if _, srv2 := splitHostedSearch([]any{map[string]any{"type": "function", "name": "f"}}); len(srv2) != 0 {
+		t.Fatal("普通 function 工具被误摘")
+	}
 }

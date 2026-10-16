@@ -29,7 +29,7 @@ func TestResponsesToChat(t *testing.T) {
 		"store":true,
 		"previous_response_id":"resp_old"
 	}`)
-	got, _, err := responsesToChat(src)
+	got, _, _, err := responsesToChat(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestResponsesToChat(t *testing.T) {
 func TestResponsesOrphanFunctionCallOutput(t *testing.T) {
 	msgsFor := func(input string) []any {
 		t.Helper()
-		got, _, err := responsesToChat([]byte(`{"model":"m","input":` + input + `}`))
+		got, _, _, err := responsesToChat([]byte(`{"model":"m","input":` + input + `}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -168,7 +168,7 @@ func TestResponsesOrphanFunctionCallOutput(t *testing.T) {
 }
 
 func TestResponsesToChatStringInput(t *testing.T) {
-	got, _, err := responsesToChat([]byte(`{"model":"m","input":"hi","stream":true}`))
+	got, _, _, err := responsesToChat([]byte(`{"model":"m","input":"hi","stream":true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +625,7 @@ func TestResponsesCustomToolAndNamespace(t *testing.T) {
 		`{"type":"custom","name":"apply_patch","description":"Apply a patch","format":{"type":"grammar","definition":"start: patch"}},` +
 		`{"type":"namespace","name":"codex_app","tools":[{"name":"list_threads","description":"list","parameters":{"type":"object"}}]}` +
 		`]}`)
-	chat, meta, err := responsesToChat(src)
+	chat, meta, _, err := responsesToChat(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -693,7 +693,7 @@ func TestResponsesCustomToolAndNamespace(t *testing.T) {
 }
 
 func TestResponsesToChatInvalidJSON(t *testing.T) {
-	_, _, err := responsesToChat([]byte(`{`))
+	_, _, _, err := responsesToChat([]byte(`{`))
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -734,7 +734,7 @@ func TestUsageCacheFields(t *testing.T) {
 		t.Fatalf("responses input_tokens_details=%v want cached_tokens 8960", d)
 	}
 
-	chat, _, err := responsesToChat([]byte(`{"model":"m","prompt_cache_key":"sess-1","input":"hi"}`))
+	chat, _, _, err := responsesToChat([]byte(`{"model":"m","prompt_cache_key":"sess-1","input":"hi"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -877,7 +877,7 @@ func TestResponsesToolContractDetails(t *testing.T) {
 		`{"type":"function","name":"read_file","description":"top","parameters":{"type":"object"}},` +
 		`{"type":"namespace","name":"codex_app","tools":[{"name":"read_file","description":"in ns","parameters":{"type":"object"}}]}` +
 		`]}`)
-	chat, meta, err := responsesToChat(src)
+	chat, meta, _, err := responsesToChat(src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1037,7 +1037,7 @@ func TestResponsesNamespaceDepthBoundary(t *testing.T) {
 		{4, "nsD"}, // 上限内
 		{5, ""},    // 超限
 	} {
-		chat, meta, err := responsesToChat([]byte(`{"model":"m","stream":true,"input":"hi","tools":[` + nest(c.depth) + `]}`))
+		chat, meta, _, err := responsesToChat([]byte(`{"model":"m","stream":true,"input":"hi","tools":[` + nest(c.depth) + `]}`))
 		if err != nil {
 			t.Fatalf("depth=%d: %v", c.depth, err)
 		}
@@ -1138,7 +1138,7 @@ func TestResponsesFlatNameAndFixupItem(t *testing.T) {
 func TestResponsesToolOutputImagesMoveToUserMessage(t *testing.T) {
 	msgsFor := func(input string) []any {
 		t.Helper()
-		got, _, err := responsesToChat([]byte(`{"model":"m","input":` + input + `}`))
+		got, _, _, err := responsesToChat([]byte(`{"model":"m","input":` + input + `}`))
 		if err != nil {
 			t.Fatal(err)
 		}
