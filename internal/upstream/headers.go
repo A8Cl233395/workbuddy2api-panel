@@ -262,7 +262,9 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 // 头族分四层，各司其职：
 //   - X-Conversation-ID：会话级，多轮稳定。客户端声明（body conversationId）→ 原值透传；
 //     客户端没声明 → 用网关的 uid 隔离会话键（见 issue #169 实验：该头是前缀缓存槽的
-//     实际来源，缺了它大前缀在 hy4/step 这类后端上恒 0% 命中）。
+//     实际来源，缺了它大前缀在 hy4/step 这类后端上恒 0% 命中）；两者都没有（零值
+//     ChatMeta）→ 现造 32 hex，**不留空**——上游按三件套是否齐全做渠道校验，缺任一头
+//     即 400 code=11-128 "conversation id missing"。
 //   - X-Conversation-Request-ID：**对话轮级聚合主键**，必发。一次 user send 内的
 //     所有 tool call/重试/换号/降级复用同一个 → 后台按它聚合成一条（不再碎片化）。
 //   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立（32 位 hex）。
@@ -285,6 +287,12 @@ func (c *Client) injectConversationHeaders(req *http.Request, uid string, meta C
 		// 客户端没声明会话：用与 prompt_cache_key 同源的 uid 隔离键填该头。
 		// 不带 uid 段的话，同一客户端会话打在不同账号上会共用同一个上游缓存槽（见文件头隔离约束）。
 		req.Header.Set("X-Conversation-ID", buildCacheKey(uid, src))
+	} else {
+		// 零值 ChatMeta（夜猫子对话、面板模型任务等无 body 会话概念的调用方）：
+		// 头族是**渠道校验**的一部分——上游要求三件套齐全，缺任一头即 400
+		// code=11-128 "conversation id missing"（官方客户端 chat/speech 都带）。
+		// 故不再留空，现造一个 32 hex；该路径无会话状态，不必跨请求稳定。
+		req.Header.Set("X-Conversation-ID", session.NewMessageID())
 	}
 	req.Header.Set("X-Conversation-Request-ID", convReqID)
 	req.Header.Set("X-Conversation-Message-ID", messageID)

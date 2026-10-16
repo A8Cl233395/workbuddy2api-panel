@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
 const (
@@ -446,6 +447,10 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
 	h.Set("X-Conversation-ID", conversationID)
+	// 渠道校验三件套的另两件（缺任一头上游 400 code=11-128 "conversation id missing"）：
+	// 该路径手搓头绕过 ChatHeaders，此前只带了 Conversation-ID。
+	h.Set("X-Conversation-Request-ID", session.NewMessageID())
+	h.Set("X-Conversation-Message-ID", session.NewMessageID())
 	h.Set("X-Request-ID", fmt.Sprintf("%d", time.Now().UnixNano()))
 	h.Set("X-Agent-Intent", "craft")
 	h.Set("X-Agent-Type", "main")

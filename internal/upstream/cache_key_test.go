@@ -143,10 +143,13 @@ func TestChatMetaCacheKeySource(t *testing.T) {
 		meta      ChatMeta
 		wantKey   string
 		wantConvH string
+		// wantConvAny：两源皆空时该头**不再留空**（上游渠道校验要求三件套齐全，缺任一头
+		// 即 400 code=11-128 "conversation id missing"）——现造 32 hex，值不可预知，只断言非空。
+		wantConvAny bool
 	}{
-		{"仅粘性键", ChatMeta{CacheKeyID: "sess-abc"}, buildCacheKey("u1", "sess-abc"), buildCacheKey("u1", "sess-abc")},
-		{"客户端会话优先", ChatMeta{ConversationID: "conv-1", CacheKeyID: "sess-abc"}, buildCacheKey("u1", "conv-1"), "conv-1"},
-		{"两源皆空", ChatMeta{}, buildCacheKey("u1", ""), ""},
+		{"仅粘性键", ChatMeta{CacheKeyID: "sess-abc"}, buildCacheKey("u1", "sess-abc"), buildCacheKey("u1", "sess-abc"), false},
+		{"客户端会话优先", ChatMeta{ConversationID: "conv-1", CacheKeyID: "sess-abc"}, buildCacheKey("u1", "conv-1"), "conv-1", false},
+		{"两源皆空", ChatMeta{}, buildCacheKey("u1", ""), "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotBody []byte
@@ -167,7 +170,11 @@ func TestChatMetaCacheKeySource(t *testing.T) {
 			if got := extractCacheKey(t, gotBody); got != tc.wantKey {
 				t.Errorf("prompt_cache_key=%q want %q", got, tc.wantKey)
 			}
-			if gotConv != tc.wantConvH {
+			if tc.wantConvAny {
+				if gotConv == "" {
+					t.Error("X-Conversation-ID 不得留空：上游渠道校验要求三件套齐全")
+				}
+			} else if gotConv != tc.wantConvH {
 				t.Errorf("X-Conversation-ID=%q want %q（无客户端声明时用 uid 隔离的会话键）", gotConv, tc.wantConvH)
 			}
 		})
