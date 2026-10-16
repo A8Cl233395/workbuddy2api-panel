@@ -1549,3 +1549,110 @@ func TestPanelRemarkWiring(t *testing.T) {
 		}
 	}
 }
+
+// TestAppJSCompensationCard 官方补偿卡片（上游 PR #196）：待领显形 + 跳过带原因 +
+// 失败红行 + ≤48h 标红 + 领取按钮只出现在待领行。
+//
+// 为什么值得一测：这张卡的全部价值就是「看不见的状态变成看得见」——渲染层若把
+// 跳过/失败行吞掉，就把「查不到」显示成「没有补偿」，正是本改动要消灭的界面谎言。
+func TestAppJSCompensationCard(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; compensation card test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('/* ══ 官方补偿（上游 PR #196）');
+const end = src.indexOf('let lastPackages');
+if (start < 0 || end < start) throw new Error('compensation block not found');
+const els = {};
+function el(id) {
+  if (!els[id]) els[id] = { textContent: '', innerHTML: '', addEventListener: () => {} };
+  return els[id];
+}
+const now = Date.parse('2026-10-20T00:00:00+08:00');
+class FakeDate extends Date { static now() { return now; } }
+const ctx = {
+  Date: FakeDate, Math, Number, String, JSON, encodeURIComponent,
+  PK_DAY_MS: 86400000,
+  $: el,
+  esc: (s) => String(s == null ? '' : s),
+  fmtTok: (n) => String(n),
+  toast: () => {},
+  api: async () => ({}),
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderCompensation = renderCompensation; this.setData = (d) => { compData = d; };', ctx);
+
+ctx.setData({ errored: 1, accounts: [
+  { uid: 'aaaaaaaa-1', nickname: '待领号', active: true, claimed: false, credit: 500, end_time: '2026-10-21 23:59:59' },
+  { uid: 'bbbbbbbb-2', nickname: '已领号', active: true, claimed: true, credit: 500, end_time: '2026-10-22 23:59:59' },
+  { uid: 'cccccccc-3', nickname: '跳过号', skip: true, skip_reason: '国际区账号不适用国内区补偿' },
+  { uid: 'dddddddd-4', nickname: '失败号', error: 'boom' },
+  { uid: 'eeeeeeee-5', nickname: '无活动号' },
+] });
+ctx.renderCompensation();
+const body = els['compBody'].innerHTML;
+const note = els['compNote'].innerHTML;
+process.stdout.write(JSON.stringify({
+  hasPending: body.includes('待领'),
+  pendingBtn: body.includes('data-comp="aaaaaaaa-1"'),
+  claimedNoBtn: !body.includes('data-comp="bbbbbbbb-2"'),
+  skipLine: body.includes('跳过') && body.includes('国际区账号不适用国内区补偿'),
+  failLine: body.includes('查询/领取失败'),
+  noActivity: body.includes('无活动'),
+  soonRed: body.includes('var(--bad)'),
+  notePending: note.includes('待领 1 个'),
+  noteErrored: note.includes('1 个查询失败'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "comp-card-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("compensation card node test failed: %v\n%s", err, out)
+	}
+	const want = `{"hasPending":true,"pendingBtn":true,"claimedNoBtn":true,"skipLine":true,` +
+		`"failLine":true,"noActivity":true,"soonRed":true,"notePending":true,"noteErrored":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("补偿卡片渲染不符:\n got=%s\nwant=%s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestPanelCompensationWiring 接线齐备性：少一个 id 或漏一个绑定，表现为「按钮点了没反应」，
+// 而 Go 编译、JS 语法检查、顶层冒烟都发现不了。
+func TestPanelCompensationWiring(t *testing.T) {
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`id="compNote"`, `id="compBody"`, `id="btnCompRefresh"`, `id="btnCompAll"`,
+	} {
+		if !bytes.Contains(html, []byte(want)) {
+			t.Fatalf("index.html 缺少 %s", want)
+		}
+	}
+	js, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"function renderCompensation(",
+		"function loadCompensation(",
+		"function claimCompensation(",
+		"function claimCompensationAll(",
+		"$('btnCompRefresh').onclick",
+		"$('btnCompAll').onclick",
+	} {
+		if !bytes.Contains(js, []byte(want)) {
+			t.Fatalf("app.js 缺少 %s", want)
+		}
+	}
+}

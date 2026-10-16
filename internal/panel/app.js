@@ -1362,12 +1362,18 @@ $('btnRefresh').onclick = async () => {
 
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
 function refreshVisible() {
-  if (view === 'accounts') loadOverview(true);
+  if (view === 'accounts') {
+    loadOverview(true);
+    // 补偿状态只在进页面/手动点击时取数（无 overview 快照，5s 拉一次就是打上游）；
+    // 这里只对缓存做本地重渲染，让截止倒计时继续走动。
+    renderCompensation();
+  }
   else if (view === 'logs') loadLogs();
   else if (view === 'taskscenter') reattachQueueView();
 }
 function start() {
   loadOverview(true);
+  loadCompensation();
   if (refTimer) clearInterval(refTimer);
   refTimer = setInterval(refreshVisible, 5000);
   checkAuthGate();
@@ -2864,6 +2870,116 @@ if ($('expBody')) $('expBody').addEventListener('click', ev => {
 
 // 按需拉取（移植上游 8391a05）：packages 是**逐账号实时查上游**，切进本视图就打一次，
 // 账号一多既慢又压上游。有缓存先直接渲染（标注数据年龄），只有首次进入或显式刷新生效。
+/* ══ 官方补偿（上游 PR #196）：先查状态再领、带截止倒计时 ═══════════════════
+   取数与呈现分离：compData 只在进页面 / 点「检查」 / 点领取后刷新（补偿没有 overview
+   快照，挂进 5s 的 refreshVisible 就是每 5 秒打上游）；倒计时走动靠本地重渲染。 */
+let compData = null;
+const COMP_SOON_MS = 48 * 3600 * 1000;  // ≤48h 标红：补偿过期就真没了
+
+// 上游 end_time 是 "2006-01-02 15:04:05" 无时区字符串，按 +08:00 解释（同 pkExpiryMs）。
+function compEndMs(text) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  const ms = Date.parse(t.replace(' ', 'T') + '+08:00');
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function compPending(r) {
+  return !r.skip && !r.error && r.active && !r.claimed && (r.credit || 0) > 0;
+}
+
+function compRemainText(ms) {
+  if (ms == null) return '—';
+  const diff = ms - Date.now();
+  if (diff <= 0) return '已截止';
+  const hours = Math.floor(diff / 3600000);
+  if (hours < 48) return hours + ' 小时';
+  return Math.ceil(diff / PK_DAY_MS) + ' 天';
+}
+
+function renderCompensation() {
+  const body = $('compBody');
+  if (!body) return;
+  const rows = (compData && compData.accounts) || [];
+  const now = Date.now();
+  body.innerHTML = !rows.length ? '<tr><td colspan="5">未查询（点「检查」）</td></tr>'
+    : rows.map(r => {
+      const who = esc(r.nickname || String(r.uid || '').slice(0, 8));
+      let state = '<span class="tag ok">无活动</span>';
+      if (r.skip) state = '<span class="tag">跳过：' + esc(r.skip_reason || '不适用') + '</span>';
+      else if (r.error) state = '<span class="tag bad" title="' + esc(r.error) + '">查询/领取失败</span>';
+      else if (r.claimed) state = '<span class="tag ok">已领</span>';
+      else if (compPending(r)) state = '<span class="tag warn">待领</span>';
+      const ms = compEndMs(r.end_time);
+      const soon = ms != null && ms - now <= COMP_SOON_MS;
+      const remain = r.end_time
+        ? '<span style="color:' + (soon ? 'var(--bad)' : 'var(--ink-3)') + '">' + compRemainText(ms) + '</span>'
+        : '—';
+      const act = compPending(r)
+        ? '<button class="xs" data-comp="' + esc(r.uid) + '">领取</button>' : '';
+      return '<tr><td>' + who + '</td><td>' + state + '</td>' +
+        '<td class="num">' + (r.credit ? fmtTok(r.credit) : '—') + '</td>' +
+        '<td class="num">' + remain + '</td>' +
+        '<td class="c-acts">' + act + '</td></tr>';
+    }).join('');
+  const pend = rows.filter(compPending);
+  const sum = pend.reduce((n, r) => n + (r.credit || 0), 0);
+  const erred = Number((compData && compData.errored) || 0);
+  // 失败数必须显形：全失败时若只报「没有待领」，等于把故障说成「没活动」。
+  $('compNote').innerHTML = !compData ? ''
+    : (pend.length ? '待领 ' + pend.length + ' 个 · 合计 ' + fmtTok(sum) + ' 积分' : '无待领补偿')
+      + (erred ? ' · <span style="color:var(--bad)">' + erred + ' 个查询失败</span>' : '');
+}
+
+async function loadCompensation() {
+  if (!$('compBody')) return;
+  try {
+    compData = await api('compensation');
+  } catch (e) {
+    compData = null;
+    $('compNote').innerHTML = '<span style="color:var(--bad)">读取失败：' + esc(e.message) + '</span>';
+    return;
+  }
+  renderCompensation();
+}
+
+async function claimCompensation(uid) {
+  try {
+    const r = await api('accounts/' + encodeURIComponent(uid) + '/compensation', { method: 'POST' });
+    if (r && r.error) toast('领取失败：' + (r.skip_reason || r.error), 'bad');
+    else if (r && r.skip) toast('跳过：' + (r.skip_reason || '不适用'));
+    else toast('补偿已领取' + (r && r.credit ? ' +' + r.credit : ''));
+  } catch (e) {
+    toast('领取失败：' + e.message, 'bad');
+  }
+  await loadCompensation();
+}
+
+async function claimCompensationAll() {
+  const btn = $('btnCompAll');
+  if (btn) btn.disabled = true;
+  try {
+    const d = await api('compensation_all', { method: 'POST' });
+    const s = (d && d.summary) || {};
+    // 先看 errored 再看 claimed：上游全挂时 claimed 恒 0，只看 claimed 会把故障说成「没活动」。
+    if (s.errored) toast('补偿：' + s.errored + ' 个账号失败，已领 ' + (s.claimed || 0) + ' 个（+'
+      + (s.credit || 0) + ' 积分）', 'bad');
+    else toast('补偿：已领 ' + (s.claimed || 0) + ' 个（+' + (s.credit || 0) + ' 积分），其余无可领');
+  } catch (e) {
+    toast('全部领取失败：' + e.message, 'bad');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+  await loadCompensation();
+}
+
+if ($('btnCompRefresh')) $('btnCompRefresh').onclick = () => loadCompensation();
+if ($('btnCompAll')) $('btnCompAll').onclick = claimCompensationAll;
+if ($('compBody')) $('compBody').addEventListener('click', ev => {
+  const btn = ev.target.closest('button[data-comp]');
+  if (btn) claimCompensation(btn.getAttribute('data-comp'));
+});
+
 let lastPackages = null, lastPackagesAt = 0, lastPkLimit = 0;
 
 async function loadPackages(force) {
