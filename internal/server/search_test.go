@@ -103,3 +103,41 @@ func TestSearchEndpoint(t *testing.T) {
 		t.Fatalf("空池应 503 no_account，得到 %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestSearchDeepSwitch deep:true 走 agentic_search（综述原文），缺省仍走 snippet 快路径。
+func TestSearchDeepSwitch(t *testing.T) {
+	f := &searchFake{status: 200, body: `{"query":"x","results":[{"title":"t","url":"https://x/1","snippet":"s"}]}`}
+	p := testPoolWith(&auth.Auth{UID: "c1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
+	h := NewHandler(Config{Pool: p, Upstream: f.client()})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/search", strings.NewReader(`{"query":"x"}`)))
+	if rec.Code != 200 || f.paths[0] != "/agenttool/v1/search" {
+		t.Fatalf("缺省应走 snippet 快路径: code=%d path=%v", rec.Code, f.paths)
+	}
+
+	// deep:true → agentic_search，且 done 帧原文透出（synthesis/content 都在）
+	agentic := `event: done` + "\n" + `data: {"partial":true,"partial_reason":"timeout",` +
+		`"synthesis":{"content":"综述正文","inline_content":"综述"},"results":[{"id":"r1","content":"正文"}]}` + "\n\n"
+	f2 := &searchFake{status: 200, body: agentic}
+	h2 := NewHandler(Config{Pool: p, Upstream: f2.client()})
+	rec = httptest.NewRecorder()
+	h2.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/search", strings.NewReader(`{"query":"x","deep":true}`)))
+	if rec.Code != 200 {
+		t.Fatalf("deep code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if f2.paths[0] != "/agenttool/v1/agentic_search" {
+		t.Fatalf("deep 应落 agentic_search: %v", f2.paths)
+	}
+	var done map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &done); err != nil {
+		t.Fatalf("deep 响应不是 done 原文: %v (%s)", err, rec.Body.String())
+	}
+	if syn, _ := done["synthesis"].(map[string]any); syn["content"] != "综述正文" {
+		t.Fatalf("综述未透传: %v", done)
+	}
+	// partial 是上游自己的降级标记，必须让调用方看见（别把降级当完整）
+	if done["partial"] != true || done["partial_reason"] != "timeout" {
+		t.Fatalf("partial 未透传: %v", done)
+	}
+}

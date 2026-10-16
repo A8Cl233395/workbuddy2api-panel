@@ -8,6 +8,7 @@
 //
 //	POST /v1/search
 //	{"query": "玉林 电梯 维保 新规", "max_results": 5}
+//	{"query": "...", "deep": true}   ← 综述式（agentic_search），单次 40~66s
 package server
 
 import (
@@ -31,6 +32,10 @@ type searchRequest struct {
 	MaxResults int    `json:"max_results"`
 	Model      string `json:"model"` // 可选，只取 realm 前缀
 	Realm      string `json:"realm"` // 可选，优先于 model 前缀
+	// Deep 可选：走官方综述式检索（agentic_search），回 done 帧原文
+	// （synthesis.content 带引用的综述 + results 整页正文）。实测单次 40~66s，
+	// 默认 false 保持 snippet 快路径（~1s）。
+	Deep bool `json:"deep"`
 }
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +71,13 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		tried[a.UID] = true
-		data, err := h.cfg.Upstream.Search(r.Context(), a, query, req.MaxResults)
+		var data json.RawMessage
+		var err error
+		if req.Deep {
+			data, err = h.cfg.Upstream.AgenticSearch(r.Context(), a, query)
+		} else {
+			data, err = h.cfg.Upstream.Search(r.Context(), a, query, req.MaxResults)
+		}
 		if err == nil {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(data)
