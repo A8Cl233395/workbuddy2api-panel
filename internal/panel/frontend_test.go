@@ -1673,6 +1673,19 @@ func TestPanelCompensationWiring(t *testing.T) {
 			t.Fatalf("index.html 缺少 %s", want)
 		}
 	}
+	// 卡片必须落在「任务中心」视图内（它讲的是「今天要不要动手」，与成长任务同处）——
+	// 只查 id 存在的话，放回账号池视图也照样通过。
+	tc := bytes.Index(html, []byte(`id="view-taskscenter"`))
+	next := bytes.Index(html[tc+1:], []byte(`<section class="view"`))
+	if tc < 0 || next < 0 {
+		t.Fatal("定位不到任务中心视图边界")
+	}
+	for _, id := range []string{`id="compNote"`, `id="compBody"`, `id="btnCompAll"`} {
+		at := bytes.Index(html, []byte(id))
+		if at < tc || at > tc+1+next {
+			t.Fatalf("%s 不在任务中心视图内（视图区间 %d..%d，实际 %d）", id, tc, tc+1+next, at)
+		}
+	}
 	js, err := os.ReadFile("app.js")
 	if err != nil {
 		t.Fatal(err)
@@ -1688,6 +1701,17 @@ func TestPanelCompensationWiring(t *testing.T) {
 		if !bytes.Contains(js, []byte(want)) {
 			t.Fatalf("app.js 缺少 %s", want)
 		}
+	}
+	// 取数时机随卡片一起搬：进任务中心按需拉（compData 空才打上游），start() 不再拉。
+	if !bytes.Contains(js, []byte("if (v === 'taskscenter') { reattachQueueView(); if (!compData) loadCompensation(); }")) {
+		t.Error("app.js 未在进入任务中心时按需拉取补偿状态")
+	}
+	start := bytes.Index(js, []byte("function start() {"))
+	if start < 0 {
+		t.Fatal("找不到 start()")
+	}
+	if bytes.Contains(js[start:start+200], []byte("loadCompensation()")) {
+		t.Error("start() 仍在首屏拉补偿状态（已随卡片搬走）")
 	}
 }
 

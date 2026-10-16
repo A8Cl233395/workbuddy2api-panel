@@ -374,7 +374,8 @@ function go(v) {
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
-  if (v === 'taskscenter') reattachQueueView();
+  // 补偿状态按需拉取：compData 为空才打上游（失败留空 → 下次进入重试）。
+  if (v === 'taskscenter') { reattachQueueView(); if (!compData) loadCompensation(); }
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 /* 首次进入延到本轮脚本求值之后再 go()。
@@ -1371,16 +1372,17 @@ $('btnRefresh').onclick = async () => {
 function refreshVisible() {
   if (view === 'accounts') {
     loadOverview(true);
-    // 补偿状态只在进页面/手动点击时取数（无 overview 快照，5s 拉一次就是打上游）；
+  }
+  else if (view === 'logs') loadLogs();
+  else if (view === 'taskscenter') {
+    reattachQueueView();
+    // 补偿状态只在进本视图/手动点击时取数（无 overview 快照，5s 拉一次就是打上游）；
     // 这里只对缓存做本地重渲染，让截止倒计时继续走动。
     renderCompensation();
   }
-  else if (view === 'logs') loadLogs();
-  else if (view === 'taskscenter') reattachQueueView();
 }
 function start() {
   loadOverview(true);
-  loadCompensation();
   if (refTimer) clearInterval(refTimer);
   refTimer = setInterval(refreshVisible, 5000);
   checkAuthGate();

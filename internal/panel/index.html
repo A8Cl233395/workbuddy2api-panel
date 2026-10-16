@@ -692,28 +692,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
       </div>
 
-      <!-- 官方补偿：带截止日的限时活动。取数只在进页面 / 点「检查」 / 点领取时发生
-           （补偿状态没有 overview 快照可吃，挂进 5s 刷新就是每 5 秒打上游），
-           倒计时走动由前端对缓存做本地重渲染。 -->
-      <div class="box">
-        <header>
-          <h3>官方补偿 <span class="hint">先查状态再领 · 无待领不发领取请求</span></h3>
-          <span class="grow"></span>
-          <span class="note" id="compNote"></span>
-          <button class="xs" id="btnCompRefresh">检查</button>
-          <button class="xs primary" id="btnCompAll">全部领取</button>
-        </header>
-        <div class="tbl-wrap">
-        <table class="acc">
-          <thead><tr>
-            <th>账号</th><th>状态</th><th class="num">可领</th>
-            <th class="num">距截止</th><th class="c-acts"></th>
-          </tr></thead>
-          <tbody id="compBody"></tbody>
-        </table>
-        </div>
-      </div>
-
       <div class="box">
         <header>
           <h3>账号池</h3>
@@ -786,6 +764,28 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <div class="d">扫描所有账号没做完的成长任务，排成一列，一键执行。</div>
         </div>
         <div id="qcList"></div>
+      </div>
+
+      <!-- 官方补偿：带截止日的限时活动，与成长任务同属「今天要不要动手」的事，故放任务中心。
+           取数只在进入本视图 / 点「检查」 / 点领取时发生（补偿状态没有 overview 快照可吃，
+           挂进 5s 刷新就是每 5 秒打上游），倒计时走动由前端对缓存做本地重渲染。 -->
+      <div class="box">
+        <header>
+          <h3>官方补偿 <span class="hint">先查状态再领 · 无待领不发领取请求</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="compNote"></span>
+          <button class="xs" id="btnCompRefresh">检查</button>
+          <button class="xs primary" id="btnCompAll">全部领取</button>
+        </header>
+        <div class="tbl-wrap">
+        <table class="acc">
+          <thead><tr>
+            <th>账号</th><th>状态</th><th class="num">可领</th>
+            <th class="num">距截止</th><th class="c-acts"></th>
+          </tr></thead>
+          <tbody id="compBody"></tbody>
+        </table>
+        </div>
       </div>
     </section>
 
