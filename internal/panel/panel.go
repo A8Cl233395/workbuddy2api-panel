@@ -430,8 +430,10 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
 	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
+	var cnAcct, globalAcct *auth.Auth // 供下方模型繁忙度复用同一批账号
 	if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
 		if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
+			cnAcct = acct
 			infos, err := p.cfg.Upstream.FetchModels(acct)
 			if err != nil {
 				fetchErrs = append(fetchErrs, "cn: "+err.Error())
@@ -448,6 +450,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Upstream.GlobalEnabled {
 		if uids := p.cfg.Pool.AvailableUIDsForRealm("global"); len(uids) > 0 {
 			if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
+				globalAcct = acct
 				infos := p.cfg.Upstream.FetchGlobalModelInfos(acct)
 				if len(infos) == 0 {
 					fetchErrs = append(fetchErrs, "global: 上游未返回可用模型")
@@ -495,6 +498,37 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			out = append(out, e)
+		}
+	}
+
+	// 模型繁忙度（官方 /v2/chat/busy，只读观测，见 upstream/modelbusy.go）：与目录同一批
+	// 账号查，附到对应域的行上。查不到就不填字段（不编造）；失败只并入 fetchErrs（目录本身
+	// 已经拿到了，不该因为繁忙度查询失败把整个视图打成 502）。
+	for realm, acct := range map[string]*auth.Auth{"cn": cnAcct, "global": globalAcct} {
+		if acct == nil {
+			continue
+		}
+		prefix := realm + ":"
+		var ids []string
+		for _, e := range out {
+			if id, _ := e["id"].(string); strings.HasPrefix(id, prefix) {
+				ids = append(ids, strings.TrimPrefix(id, prefix))
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		levels, err := p.cfg.Upstream.ModelBusy(acct, ids)
+		if err != nil {
+			fetchErrs = append(fetchErrs, realm+" busy: "+err.Error())
+			continue
+		}
+		for _, e := range out {
+			if id, _ := e["id"].(string); strings.HasPrefix(id, prefix) {
+				if lv := levels[strings.TrimPrefix(id, prefix)]; lv != "" {
+					e["busy"] = lv
+				}
+			}
 		}
 	}
 
