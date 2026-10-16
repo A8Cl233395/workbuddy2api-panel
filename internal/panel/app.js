@@ -2865,15 +2865,22 @@ function renderExpirySnapshot(d) {
 }
 
 // 收纳行展开/收起（与「积分构成」页 pkDetail 同款：查 data 行 + aria-expanded + 改按钮文案）。
-if ($('expBody')) $('expBody').addEventListener('click', ev => {
-  const btn = ev.target.closest('button[data-exp-rest]');
-  if (!btn) return;
-  const expanded = btn.getAttribute('aria-expanded') === 'true';
-  btn.closest('tbody').querySelectorAll('tr[data-exp-row="rest"]').forEach(row => { row.hidden = expanded; });
-  btn.setAttribute('aria-expanded', String(!expanded));
-  btn.textContent = (expanded ? '其余 ' : '收起其余 ') + btn.dataset.expRest + ' 个账号' +
-    (expanded ? '，展开' : '');
-});
+// 监听挂在 tbody 上（渲染替换 innerHTML 不会丢）；到期提醒与官方补偿共用本函数。
+function bindRestToggle(id) {
+  const body = $(id);
+  if (!body) return;
+  body.addEventListener('click', ev => {
+    const btn = ev.target.closest('button[data-exp-rest]');
+    if (!btn) return;
+    const expanded = btn.getAttribute('aria-expanded') === 'true';
+    btn.closest('tbody').querySelectorAll('tr[data-exp-row="rest"]').forEach(row => { row.hidden = expanded; });
+    btn.setAttribute('aria-expanded', String(!expanded));
+    btn.textContent = (expanded ? '其余 ' : '收起其余 ') + btn.dataset.expRest + ' 个账号' +
+      (expanded ? '，展开' : '');
+  });
+}
+bindRestToggle('expBody');
+bindRestToggle('compBody');
 
 // 按需拉取（移植上游 8391a05）：packages 是**逐账号实时查上游**，切进本视图就打一次，
 // 账号一多既慢又压上游。有缓存先直接渲染（标注数据年龄），只有首次进入或显式刷新生效。
@@ -2892,7 +2899,9 @@ function compEndMs(text) {
 }
 
 function compPending(r) {
-  return !r.skip && !r.error && r.active && !r.claimed && (r.credit || 0) > 0;
+  // 布尔化：&& 链对缺字段的行会返回 undefined，进 Number() 变 NaN —— 排序比较器收到
+  // NaN 时 V8 的结果未定义（实测「待领优先」会静默失效），故这里收成 true/false。
+  return Boolean(!r.skip && !r.error && r.active && !r.claimed && (r.credit || 0) > 0);
 }
 
 function compRemainText(ms) {
@@ -2909,8 +2918,10 @@ function renderCompensation() {
   if (!body) return;
   const rows = (compData && compData.accounts) || [];
   const now = Date.now();
-  body.innerHTML = !rows.length ? '<tr><td colspan="5">未查询（点「检查」）</td></tr>'
-    : rows.map(r => {
+  // 待领优先（有操作价值的先露），其余保持池顺序；20 个号一屏铺不下，只展开前 3 行。
+  rows.sort((a, b) => Number(compPending(b)) - Number(compPending(a)));
+  const COMP_HEAD = 3;
+  const rowOf = (r, hidden) => {
       const who = esc(r.nickname || String(r.uid || '').slice(0, 8));
       let state = '<span class="tag ok">无活动</span>';
       if (r.skip) state = '<span class="tag">跳过：' + esc(r.skip_reason || '不适用') + '</span>';
@@ -2924,11 +2935,18 @@ function renderCompensation() {
         : '—';
       const act = compPending(r)
         ? '<button class="xs" data-comp="' + esc(r.uid) + '">领取</button>' : '';
-      return '<tr><td>' + who + '</td><td>' + state + '</td>' +
+      return '<tr' + (hidden ? ' data-exp-row="rest" hidden' : '') + '><td>' + who + '</td><td>' + state + '</td>' +
         '<td class="num">' + (r.credit ? fmtTok(r.credit) : '—') + '</td>' +
         '<td class="num">' + remain + '</td>' +
         '<td class="c-acts">' + act + '</td></tr>';
-    }).join('');
+  };
+  const rest = rows.slice(COMP_HEAD);
+  body.innerHTML = !rows.length ? '<tr><td colspan="5">未查询（点「检查」）</td></tr>'
+    : rows.slice(0, COMP_HEAD).map(r => rowOf(r, false)).join('') +
+      (rest.length ? '<tr class="pk-group-summary"><td colspan="5">' +
+        '<button type="button" class="pk-group-toggle" data-exp-rest="' + rest.length +
+        '" aria-expanded="false">其余 ' + rest.length + ' 个账号，展开</button></td></tr>' +
+        rest.map(r => rowOf(r, true)).join('') : '');
   const pend = rows.filter(compPending);
   const sum = pend.reduce((n, r) => n + (r.credit || 0), 0);
   const erred = Number((compData && compData.errored) || 0);

@@ -1566,9 +1566,18 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const start = src.indexOf('/* ══ 官方补偿（上游 PR #196）');
 const end = src.indexOf('let lastPackages');
 if (start < 0 || end < start) throw new Error('compensation block not found');
+// 收纳行的点击处理在到期提醒那段（两个卡片共用），单独切过来一起跑。
+const tStart = src.indexOf('function bindRestToggle(id)');
+const tEnd = src.indexOf("bindRestToggle('compBody');") + "bindRestToggle('compBody');".length;
+if (tStart < 0 || tEnd < tStart) throw new Error('bindRestToggle not found');
+const toggleSrc = src.slice(tStart, tEnd);
 const els = {};
 function el(id) {
-  if (!els[id]) els[id] = { textContent: '', innerHTML: '', addEventListener: () => {} };
+  if (!els[id]) els[id] = {
+    textContent: '', innerHTML: '', hidden: false, rows: [], handlers: {},
+    addEventListener(ev, fn) { this.handlers[ev] = fn; },
+    querySelectorAll() { return this.rows; },
+  };
   return els[id];
 }
 const now = Date.parse('2026-10-20T00:00:00+08:00');
@@ -1583,14 +1592,15 @@ const ctx = {
   api: async () => ({}),
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderCompensation = renderCompensation; this.setData = (d) => { compData = d; };', ctx);
+vm.runInContext(src.slice(start, end) + '\n' + toggleSrc +
+  '\nthis.renderCompensation = renderCompensation; this.setData = (d) => { compData = d; };', ctx);
 
 ctx.setData({ errored: 1, accounts: [
-  { uid: 'aaaaaaaa-1', nickname: '待领号', active: true, claimed: false, credit: 500, end_time: '2026-10-21 23:59:59' },
   { uid: 'bbbbbbbb-2', nickname: '已领号', active: true, claimed: true, credit: 500, end_time: '2026-10-22 23:59:59' },
   { uid: 'cccccccc-3', nickname: '跳过号', skip: true, skip_reason: '国际区账号不适用国内区补偿' },
   { uid: 'dddddddd-4', nickname: '失败号', error: 'boom' },
   { uid: 'eeeeeeee-5', nickname: '无活动号' },
+  { uid: 'aaaaaaaa-1', nickname: '待领号', active: true, claimed: false, credit: 500, end_time: '2026-10-21 23:59:59' },
 ] });
 ctx.renderCompensation();
 const body = els['compBody'].innerHTML;
@@ -1605,6 +1615,29 @@ process.stdout.write(JSON.stringify({
   soonRed: body.includes('var(--bad)'),
   notePending: note.includes('待领 1 个'),
   noteErrored: note.includes('1 个查询失败'),
+  // 收纳：待领排最前、只展开前 3 行、其余 2 行收在 hidden 里、收纳按钮带计数
+  pendingFirst: body.indexOf('待领号') < body.indexOf('已领号'),
+  hiddenRows: (body.match(/data-exp-row="rest" hidden/g) || []).length,
+  toggle: body.includes('data-exp-rest="2"') && body.includes('其余 2 个账号，展开'),
+  // 点一次收纳按钮：2 行必须真展开（展开逻辑与到期提醒共用 bindRestToggle）
+  expandWorks: (() => {
+    const rows = [{ hidden: true }, { hidden: true }];
+    const tbody = els['compBody'];
+    tbody.rows = rows;
+    const btn = {
+      dataset: { expRest: '2' }, textContent: '', attrs: {},
+      getAttribute(k) { return this.attrs[k]; },
+      setAttribute(k, v) { this.attrs[k] = v; },
+      closest() { return tbody; },
+    };
+    const click = () => tbody.handlers.click({
+      target: { closest: (sel) => (sel === 'button[data-exp-rest]' ? btn : null) },
+    });
+    click();
+    const opened = rows.every(r => r.hidden === false) && btn.textContent === '收起其余 2 个账号';
+    click();
+    return opened && rows.every(r => r.hidden === true) && btn.textContent === '其余 2 个账号，展开';
+  })(),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "comp-card-*.cjs")
 	if err != nil {
@@ -1619,7 +1652,8 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("compensation card node test failed: %v\n%s", err, out)
 	}
 	const want = `{"hasPending":true,"pendingBtn":true,"claimedNoBtn":true,"skipLine":true,` +
-		`"failLine":true,"noActivity":true,"soonRed":true,"notePending":true,"noteErrored":true}`
+		`"failLine":true,"noActivity":true,"soonRed":true,"notePending":true,"noteErrored":true,` +
+		`"pendingFirst":true,"hiddenRows":2,"toggle":true,"expandWorks":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("补偿卡片渲染不符:\n got=%s\nwant=%s", strings.TrimSpace(string(out)), want)
 	}
