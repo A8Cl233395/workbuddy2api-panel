@@ -339,3 +339,41 @@ func TestStreakBonusGiftStatusFailureSkipsClaim(t *testing.T) {
 		t.Errorf("无待领礼品却领了 %d 次", stub.giftClaimCalls)
 	}
 }
+
+// TestBenefitClaimWithoutCreditUsesStatusAmount 领取成功但回执不填 credit 时，用状态查询
+// 已知的可领额度兜底：上游确有「code=0 且无 credit 字段」的回执，此刻钱已到账，显示 0
+// 是在说反话（面板会显示「已领 · 0 积分」）。
+func TestBenefitClaimWithoutCreditUsesStatusAmount(t *testing.T) {
+	stub := &compStub{
+		statusBody:     `{"code":0,"msg":"OK","data":{"claimed":false,"active":true,"credit_num":500,"end_time":"2026-10-22 23:59:59"}}`,
+		claimBody:      `{"code":0,"msg":"OK","data":{}}`, // 无 credit 字段
+		giftStatusBody: `{"code":0,"msg":"OK","data":{"claimed":false,"active":true,"credit_num":1000,"end_time":"2026-10-31 23:59:59"}}`,
+		giftClaimBody:  `{"code":0,"msg":"OK","data":{}}`,
+	}
+	s := compScheduler(t, stub)
+
+	row := s.CompensateOne("u1")
+	if row.Error != "" || !row.Claimed {
+		t.Fatalf("领取应成功: %+v", row)
+	}
+	if row.Credit != 500 {
+		t.Errorf("回执无 credit 应回落到状态额度 500，实得 %d（面板会显示 0 而钱已到账）", row.Credit)
+	}
+
+	a := s.cfg.Pool.AuthByUID("u1")
+	if got := s.claimGiftQuiet(a); got != 1000 {
+		t.Errorf("礼包同理：want 1000（状态额度），实得 %d", got)
+	}
+}
+
+// TestBenefitClaimCreditWinsOverStatus 回执有 credit 时以回执为准（兜底不得覆盖真实回执）。
+func TestBenefitClaimCreditWinsOverStatus(t *testing.T) {
+	stub := &compStub{
+		statusBody: `{"code":0,"msg":"OK","data":{"claimed":false,"active":true,"credit_num":500}}`,
+		claimBody:  `{"code":0,"msg":"OK","data":{"credit":300}}`, // 上游按实际发放，可少于可领额度
+	}
+	s := compScheduler(t, stub)
+	if row := s.CompensateOne("u1"); row.Credit != 300 {
+		t.Errorf("want 回执值 300，实得 %d", row.Credit)
+	}
+}

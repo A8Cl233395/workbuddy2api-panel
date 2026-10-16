@@ -113,6 +113,11 @@ func (s *Scheduler) compensationRowOf(st pool.Status, claim bool) CompensationRo
 		row.Error = err.Error()
 		return row
 	}
+	// 回执不填 credit 时用状态查询已知的可领额度兜底：上游确有「code=0 且无 credit 字段」
+	// 的回执（实测已领过的号每天就是这样），此刻账号其实已到账——显示 0 是在说反话。
+	if credit <= 0 {
+		credit = src.CreditNum
+	}
 	row.Credit, row.Claimed = credit, true
 	return row
 }
@@ -156,6 +161,10 @@ func (s *Scheduler) claimGiftQuiet(a *auth.Auth) int64 {
 	if err != nil {
 		log.Printf("WARN: streak-bonus %s: 礼包领取失败（可领 %dc，截止 %s）: %v", label, src.CreditNum, src.EndTime, err)
 		return 0
+	}
+	// 同补偿：回执不填 credit 就用状态查询已知额度兜底（否则日志会写「+0c」而钱已到账）。
+	if credit <= 0 {
+		credit = src.CreditNum
 	}
 	log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc（截止 %s）", label, credit, src.EndTime)
 	return credit
