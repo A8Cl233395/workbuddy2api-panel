@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -111,6 +112,38 @@ func testPoolWith(auths ...*auth.Auth) *pool.Pool {
 		p.SetCredits(a.UID, 1000, 0)
 	}
 	return p
+}
+
+// TestChatClientAbortNoPenalty 客户端已断连（ctx 取消）时的传输层失败不得记到账号头上。
+//
+// 回归背景：断连后 r.Context() 已取消，传输层分支仍无条件 NoteFailures——每断一次就
+// 给当时被选中的号记一笔连败，几次之后整池逐个被降权、且边降边被后续重试刷新，表现为
+// 「账号永远解不了封」（借鉴 MOONKEY0510/workbuddy_api cd35e5c）。断连也不该被归成
+// http_error 混进失败统计。
+func TestChatClientAbortNoPenalty(t *testing.T) {
+	calls := 0
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			return nil, context.Canceled // 客户端断连的表现：传输层错误（无 *upstream.Error）
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "ca1", AccessToken: "at-ca1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	h.ServeHTTP(httptest.NewRecorder(), req.WithContext(ctx))
+
+	if calls != 1 {
+		t.Errorf("calls=%d want 1（人已走，不轮转）", calls)
+	}
+	st, _ := p.Status("ca1")
+	if st.ConsecutiveFails != 0 || !st.DegradeUntil.IsZero() {
+		t.Errorf("客户端断连不得喂连败/降权: %+v", st)
+	}
 }
 
 // TestChatLargeBodyNoGatewayLimit 请求体无网关侧上限（max_body_mb 已移除）：

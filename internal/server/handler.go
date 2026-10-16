@@ -918,6 +918,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
+			// 客户端已断连（人走了）例外：传输错误是断连的**结果**，不是这个号的
+			// 错——喂连败会把每次断连都记到当时被选中的号上，几次之后整池逐个被
+			// 降权、且边降边被后续重试刷新，表现为「账号永远解不了封」；换号也只是
+			// 白打上游。真传输抖动（ctx 未取消）照旧计罚。
+			if r.Context().Err() != nil {
+				st.outcome = reqlog.OutcomeInterrupted
+				fail(acct.UID)
+				break
+			}
 			h.cfg.Pool.NoteFailures(acct.UID)
 			fail(acct.UID)
 			if !rotateBackoff(i, r.Context()) {
@@ -1329,7 +1338,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	st.status = status
 	// 上游流级失败（首帧否决 / 流内 error 帧）的观测是 stream_error：客户端拿到 503
 	// 只是「网关没能提交流」的结果，不是另一类故障，别在这里洗成 http_error。
-	if st.outcome != reqlog.OutcomeStreamError {
+	// 客户端主动断连（interrupted）同理：人走了不是网关的 HTTP 错误，别洗成
+	// http_error 混进失败统计。
+	if st.outcome != reqlog.OutcomeStreamError && st.outcome != reqlog.OutcomeInterrupted {
 		st.outcome = reqlog.OutcomeHTTPError
 	}
 }
