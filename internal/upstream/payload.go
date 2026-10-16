@@ -67,6 +67,7 @@ func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts 
 	normalizeToolPatterns(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
+	normalizeStop(obj)
 	dropReasoningContentParts(obj)
 	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
 	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
@@ -332,6 +333,25 @@ func normalizeImageURL(obj map[string]any) {
 			part["image_url"] = map[string]any{"url": imageURL}
 		}
 	}
+}
+
+// normalizeStop 兼容 OpenAI chat 请求 stop 字段的两种合法写法。
+//
+// OpenAI 规范允许 stop 为字符串或字符串数组（≤4 个停止词），部分客户端（SillyTavern
+// 等）只发字符串形态；但上游 Go struct 把 stop 定义成 []string，字符串形态直接解码
+// 失败：400 code=11101 "cannot unmarshal string into Go struct field ***.stop of type
+// []string"。网关把 11101 归 ErrBadParams（不罚号但**仍轮换**），同一 body 换任何号都
+// 必然同样 400——全池试完走末端透传，客户端看到「所有账号不可用」，与账号健康无关。
+//
+// 只做形状转换：字符串 → 单元素数组。**不 TrimSpace**——停止词的前后空白是匹配语义
+// 本身（"\n\nHuman:"、"\n\n" 靠前导换行触发），裁剪等于静默改写客户端意图。空串同样
+// 转 [""] 保留（不替客户端判定什么是无效值）；数组 / null / 其他类型 / 字段缺失一律不动。
+func normalizeStop(obj map[string]any) {
+	s, ok := obj["stop"].(string)
+	if !ok {
+		return
+	}
+	obj["stop"] = []string{s}
 }
 
 // dropReasoningContentParts 剔除 chat content 数组里的 reasoning_text / reasoning 片段
