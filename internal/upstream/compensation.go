@@ -26,7 +26,16 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
-// CompensationStatus 单账号的补偿活动状态。
+// 官方「福利」类活动共用同一响应形态（补偿 / 新手礼包实测同构）：
+//
+//	POST /billing/meter/compensation-status  补偿（有无活动看 active）
+//	POST /billing/meter/check-gift-claimed   新手礼包状态（**无 /v2 前缀**，带 /v2 是 404）
+const (
+	compensationStatusPath = "/billing/meter/compensation-status"
+	giftStatusPath         = "/billing/meter/check-gift-claimed"
+)
+
+// CompensationStatus 单账号的补偿 / 礼包活动状态（两类同构，故共用一个结构）。
 type CompensationStatus struct {
 	Active    bool  `json:"active"`     // 当前是否有生效中的补偿活动（false = 无活动，正常返回）
 	Claimed   bool  `json:"claimed"`    // 本次活动是否已领取
@@ -50,7 +59,25 @@ func (s CompensationStatus) Pending() bool {
 // ClaimCompensation / ClaimGift 同域同头；实测该端点 CLI 域与 Web 域返回一致，
 // 不必像 growth 领奖那样切 webBase。
 func (c *Client) GetCompensationStatus(a *auth.Auth) (CompensationStatus, error) {
-	data, err := c.billingJSON(a, http.MethodPost, "/billing/meter/compensation-status", map[string]any{})
+	return c.benefitStatus(a, compensationStatusPath)
+}
+
+// GetGiftStatus 查新手礼包状态（每号一次、带有效期）。同域同头，字段与补偿同构：
+//
+//	{"code":0,"data":{"claimed":true,"claimed_at":"2026-09-24 18:15:15","active":true,
+//	   "credit_num":1500,"validity_period":1,"start_time":"2026-04-01 00:00:00",
+//	   "end_time":"2026-10-31 23:59:59"}}
+//
+// 用途与补偿完全一致：ClaimGift 对「已领过」也只返回 (0, nil)，盲领会在日志里打出
+// 假的「🎊 新手礼包 +0c」成功行。
+func (c *Client) GetGiftStatus(a *auth.Auth) (CompensationStatus, error) {
+	return c.benefitStatus(a, giftStatusPath)
+}
+
+// benefitStatus 福利状态查询（补偿 / 礼包共用）：走 billingJSON（billingBase），与
+// 两者的领取端点同域同头。
+func (c *Client) benefitStatus(a *auth.Auth, path string) (CompensationStatus, error) {
+	data, err := c.billingJSON(a, http.MethodPost, path, map[string]any{})
 	if err != nil {
 		return CompensationStatus{}, err
 	}

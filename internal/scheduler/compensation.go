@@ -127,3 +127,31 @@ func (s *Scheduler) claimCompensationQuiet(a *auth.Auth) int64 {
 	}
 	return row.Credit
 }
+
+// claimGiftQuiet 排程侧单账号新手礼包：与补偿同一纪律——先查状态，待领才领。
+// 旧写法 `if credit, err := ClaimGift(a); err == nil { log }` 对「已领过」也返回 (0, nil)
+// （上游 200 + 无 credit 字段），于是每个已领号每天打一行假的「🎊 新手礼包 +0c」。
+// 待领才领：无活动/已领/无额度静默，查询与领取失败 WARN（含截止，礼包也带有效期）。
+func (s *Scheduler) claimGiftQuiet(a *auth.Auth) int64 {
+	label := logfmt.Label(a.UID, a.Nickname)
+	src, err := s.cfg.Upstream.GetGiftStatus(a)
+	if err != nil {
+		// 已知没有个人礼包体系的账号（global / 企业 / 已禁用）查询失败属预期，静默——
+		// 否则每天固定刷出几行噪声；CN 正常号的查询失败必须 WARN（旧盲领正是在这里无痕）。
+		if st, ok := s.cfg.Pool.Status(a.UID); ok && (st.Realm == "global" || st.Enterprise || st.Disabled) {
+			return 0
+		}
+		log.Printf("WARN: streak-bonus %s: 礼包状态查询失败: %v", label, err)
+		return 0
+	}
+	if !src.Pending() {
+		return 0
+	}
+	credit, err := s.cfg.Upstream.ClaimGift(a)
+	if err != nil {
+		log.Printf("WARN: streak-bonus %s: 礼包领取失败（可领 %dc，截止 %s）: %v", label, src.CreditNum, src.EndTime, err)
+		return 0
+	}
+	log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc（截止 %s）", label, credit, src.EndTime)
+	return credit
+}

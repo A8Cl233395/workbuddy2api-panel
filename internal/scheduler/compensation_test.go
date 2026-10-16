@@ -22,6 +22,11 @@ type compStub struct {
 	claimBody   string
 	claimCalls  int
 	statusCalls int
+	// 新手礼包（与补偿同结构、不同端点）：body 为空时按「无礼包」应答。
+	giftStatusBody  string
+	giftClaimBody   string
+	giftClaimCalls  int
+	giftStatusCalls int
 }
 
 func (c *compStub) server() *httptest.Server {
@@ -47,6 +52,21 @@ func (c *compStub) server() *httptest.Server {
 			c.mu.Lock()
 			c.claimCalls++
 			body := c.claimBody
+			c.mu.Unlock()
+			_, _ = w.Write([]byte(body))
+		case strings.HasSuffix(r.URL.Path, "/check-gift-claimed"):
+			c.mu.Lock()
+			c.giftStatusCalls++
+			body := c.giftStatusBody
+			c.mu.Unlock()
+			if body == "" {
+				body = `{"code":0,"msg":"OK","data":{"active":false,"claimed":false,"credit_num":0}}`
+			}
+			_, _ = w.Write([]byte(body))
+		case strings.HasSuffix(r.URL.Path, "/claim-gift"):
+			c.mu.Lock()
+			c.giftClaimCalls++
+			body := c.giftClaimBody
 			c.mu.Unlock()
 			_, _ = w.Write([]byte(body))
 		default:
@@ -227,5 +247,48 @@ func TestCompensateOneUnknownUID(t *testing.T) {
 	s := compensationScheduler(t, &compStub{statusBody: `{"code":0,"data":{}}`})
 	if row := s.CompensateOne("nope"); !row.Skip || row.Error == "" {
 		t.Errorf("未知 uid 应返回跳过+错误: %+v", row)
+	}
+}
+
+// TestStreakBonusSkipsGiftClaimWhenAlreadyClaimed 已领过礼包时**不得**再发起领取：
+// 旧写法盲调 ClaimGift，上游对「已领过」返回 200 且无 credit 字段，于是每个已领号
+// 每天打一行假的「🎊 新手礼包 +0c」。本用例在盲领代码上必红（会命中 /claim-gift）。
+func TestStreakBonusSkipsGiftClaimWhenAlreadyClaimed(t *testing.T) {
+	stub := &compStub{giftStatusBody: `{"code":0,"msg":"OK","data":{"claimed":true,` +
+		`"claimed_at":"2026-09-24 18:15:15","active":true,"credit_num":1500,` +
+		`"validity_period":1,"start_time":"2026-04-01 00:00:00","end_time":"2026-10-31 23:59:59"}}`}
+	s := compScheduler(t, stub)
+	s.RunStreakBonusNow()
+
+	if stub.giftStatusCalls != 1 {
+		t.Errorf("礼包状态查询次数=%d want 1", stub.giftStatusCalls)
+	}
+	if stub.giftClaimCalls != 0 {
+		t.Errorf("已领过却发起了 %d 次领取（盲领回归）", stub.giftClaimCalls)
+	}
+}
+
+// TestStreakBonusClaimsGiftWhenPending 待领时恰好领一次，并带上有效期。
+func TestStreakBonusClaimsGiftWhenPending(t *testing.T) {
+	stub := &compStub{
+		giftStatusBody: `{"code":0,"msg":"OK","data":{"claimed":false,"active":true,` +
+			`"credit_num":1500,"validity_period":1,"end_time":"2026-10-31 23:59:59"}}`,
+		giftClaimBody: `{"code":0,"msg":"OK","data":{"credit":1500}}`,
+	}
+	s := compScheduler(t, stub)
+	s.RunStreakBonusNow()
+
+	if stub.giftStatusCalls != 1 || stub.giftClaimCalls != 1 {
+		t.Errorf("status=%d claim=%d want 1/1", stub.giftStatusCalls, stub.giftClaimCalls)
+	}
+}
+
+// TestStreakBonusGiftStatusFailureSkipsClaim 礼包状态查不到时不领（旧盲领会照领）。
+func TestStreakBonusGiftStatusFailureSkipsClaim(t *testing.T) {
+	stub := &compStub{giftStatusBody: `{"code":0,"msg":"OK","data":{"active":false,"claimed":false,"credit_num":0}}`}
+	s := compScheduler(t, stub)
+	s.RunStreakBonusNow()
+	if stub.giftClaimCalls != 0 {
+		t.Errorf("无待领礼品却领了 %d 次", stub.giftClaimCalls)
 	}
 }

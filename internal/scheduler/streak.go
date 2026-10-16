@@ -39,11 +39,9 @@ func (s *Scheduler) RunStreakBonusNow() {
 func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 	// 0. 补签保连登：本月漏签且有补签卡则从最近一天往回补（连续天数一断就要重攒 7 天）。
 	s.makeupMissed(a)
-	// 0.5 礼包（每号一次，已领返回业务错误，静默）+ 补偿（先查状态 → 待领才领，见
-	// compensation.go：盲领会把「无补偿/已领过」打成假的「+0c」成功行，真失败反倒无痕）。
-	if credit, err := s.cfg.Upstream.ClaimGift(a); err == nil {
-		log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", logfmt.Label(a.UID, a.Nickname), credit)
-	}
+	// 0.5 礼包 + 补偿：两者都走「先查状态 → 待领才领」（见 compensation.go）。
+	// 盲领会把「无活动/已领过」打成假的「+0c」成功行，真失败反倒无痕。
+	s.claimGiftQuiet(a)
 	s.claimCompensationQuiet(a)
 
 	full, err := s.cfg.Upstream.GrowthStreakFull(a)
