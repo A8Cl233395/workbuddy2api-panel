@@ -152,6 +152,11 @@ func isInvalidImageData(body string) bool {
 
 // codeMarker JSON code 字段命中（`"code":N` / `"code": N` / `"code":"N"` 形态，
 // 与 IsModelBlocked 的 code 判定同容差口径）。lower 须为小写 body。
+// HasCodeMarker 包外判据入口（server 侧 applyErrorPolicy 分野用）：按 codeMarker 的空白
+// 容差在原文里找业务码。同一条 msg 骑不同 code 的故障要靠它区分——例如 "request illegal"
+// 既是 11140 授权风控，也是 "11-128" 渠道校验拦截（见 handler 的 ErrAccountFault 分支）。
+func HasCodeMarker(body, code string) bool { return codeMarker(strings.ToLower(body), code) }
+
 func codeMarker(lower, code string) bool {
 	for _, v := range []string{`"code":` + code, `"code": ` + code, `"code":"` + code + `"`, `"code": "` + code + `"`, `"code":" ` + code + `"`, `"code": '` + code + `'`} {
 		if strings.Contains(lower, v) {

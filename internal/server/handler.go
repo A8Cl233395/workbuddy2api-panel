@@ -1571,11 +1571,20 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, notFoundCooldown, "upstream 404")
 	case upstream.ErrAccountFault:
 		// 账号级授权/配额故障按 msg 分野（口径与 Classify 的 accountFaultMarkers 一致）：
-		//   - "request illegal"（code 11140）→ 账号级**授权封禁**：硬禁用（Disable）。
+		//   - "request illegal" + code "11-128"（**渠道校验**）→ 上游自己的 displayTips 写着
+		//     「请求被拦截，请重新发送」「渠道校验失败，可能不是从官方客户端发出的」：请求级
+		//     可重试信号（实测凭证/余额/JWT 全正常、换模型换头不改结果、同号在别的客户端可用）。
+		//     永久禁用等于把好号踢出池子还要人工解冻 → 软冷却，上游解除后自愈。
+		//   - "request illegal" + code 11140（数字）→ auth_forbidden 账号级授权风控：硬禁用。
 		//   - 14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
 		if strings.Contains(strings.ToLower(body), "request illegal") {
+			if upstream.HasCodeMarker(body, "11-128") {
+				h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{},
+					"channel verification blocked (11-128 request illegal)")
+				return
+			}
 			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
 			return
 		}

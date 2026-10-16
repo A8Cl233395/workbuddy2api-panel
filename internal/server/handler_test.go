@@ -2229,3 +2229,40 @@ func TestChatMarkupRepairStrictModeRejectsUndeclaredTool(t *testing.T) {
 		t.Fatalf("未声明的工具名不得转换: %#v", msg["tool_calls"])
 	}
 }
+
+// TestApplyErrorPolicyChannelVerificationKeepsAccount 11-128「渠道校验失败」是请求级可重试
+// 拦截（上游 displayTips 自述「请重新发送」），不得永久禁用账号——禁用要人工解冻，
+// 而该号本身健康（上游 PR #198：凭证/余额/JWT 正常、换模型换头不改结果、同号在别的客户端可用）。
+func TestApplyErrorPolicyChannelVerificationKeepsAccount(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
+
+	body := `{"code":"11-128","msg":"request illegal","requestId":"r1",` +
+		`"displayMsg":{"zh":"请求被拦截，请重新发送"},` +
+		`"displayTips":{"zh":"渠道校验失败，可能不是从官方客户端发出的，请用官方客户端重新发送"}}`
+	h.applyErrorPolicy("u1", upstream.ErrAccountFault, body, "m", nil)
+
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("渠道校验拦截不得永久禁用账号: %+v", st)
+	}
+	if !st.Cooling || st.CoolKind != "soft_rate" {
+		t.Fatalf("应软冷却让账号出池自愈: %+v", st)
+	}
+}
+
+// TestApplyErrorPolicyAuthForbiddenStillDisables 11140（数字）的 request illegal 仍是
+// 账号级授权风控：保持硬禁用（需重新 OAuth，软冷却只会反复送死）。
+func TestApplyErrorPolicyAuthForbiddenStillDisables(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
+
+	h.applyErrorPolicy("u1", upstream.ErrAccountFault, `{"code":11140,"msg":"request illegal"}`, "m", nil)
+
+	st, _ := p.Status("u1")
+	if !st.Disabled {
+		t.Fatalf("11140 授权风控应硬禁用: %+v", st)
+	}
+}
