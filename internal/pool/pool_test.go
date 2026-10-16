@@ -2050,6 +2050,49 @@ func TestReviveClearsPaused(t *testing.T) {
 	}
 }
 
+// TestReviveClearsDegrade 运维「解冻」是全清：连败降权（issue #114）一并解除。
+// 面板把「降权中」的账号同样显示成「解冻」，只清冷却/熔断会让点完按钮的账号仍被
+// degradeUntil 挡在池外——表现为「解冻无效」（借鉴 MOONKEY0510/workbuddy_api cd35e5c）。
+func TestReviveClearsDegrade(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"}) // 健康对照：降权期内 u1 不应出现在 normal 选号
+	p.SetCredits("u1", 100, 100)
+	p.SetCredits("u2", 100, 100)
+	for i := 0; i < 20; i++ {
+		p.NoteFailures("u1") // 达阈即降权，阈值为池内默认
+	}
+	p.NoteFailures("u1")
+	p.NoteFailures("u1") // 降权期内再喂两笔（未达阈）：计数非零，供下方断言 Revive 清零
+	if st, _ := p.Status("u1"); st.DegradeUntil.IsZero() {
+		t.Fatalf("连败达阈应触发降权: %+v", st)
+	}
+	if st, _ := p.Status("u1"); st.ConsecutiveFails == 0 {
+		t.Fatalf("降权期内计数应为非零（否则下方清零断言无意义）: %+v", st)
+	}
+	for i := 0; i < 20; i++ {
+		if got := p.Pick(); got != nil && got.UID == "u1" {
+			t.Fatalf("降权期内 u1 不该被选中（第 %d 次）", i)
+		}
+	}
+	if !p.Revive("u1") {
+		t.Fatal("Revive 应返回 true")
+	}
+	if st, _ := p.Status("u1"); st.ConsecutiveFails != 0 || !st.DegradeUntil.IsZero() {
+		t.Errorf("Revive 应清连续失败计数与降权截止: %+v", st)
+	}
+	seen := false
+	for i := 0; i < 60 && !seen; i++ {
+		if got := p.Pick(); got != nil && got.UID == "u1" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Error("解冻后 u1 应重新参与选号")
+	}
+}
+
 // TestPausePersists 暂停状态落盘，跨重启不丢（轮换用法要求）。
 func TestPausePersists(t *testing.T) {
 	dir := t.TempDir()

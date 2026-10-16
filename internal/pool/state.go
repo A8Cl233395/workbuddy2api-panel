@@ -94,6 +94,10 @@ func (p *Pool) Revive(uid string) bool {
 	e.fails = 0
 	e.retryCount = 0
 	e.breakerUntil = time.Time{}
+	// 连败降权一并清：「降权中」的账号在面板同样显示「解冻」，但只清冷却/熔断会让
+	// 点完按钮的账号仍被 degradeUntil 挡在池外（frozen = disabled || 降权中）。
+	e.consecutiveFails = 0
+	e.degradeUntil = time.Time{}
 	p.dirty.Store(true)
 	return true
 }
