@@ -106,7 +106,7 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 				// 请求级/模型级错误与账号无关：审核与参数是请求本身的属性，14401/11102 是
 				// 该模型在本域没有路由。换号必然同样失败——实测 14401 会打满全池账号，
 				// 白烧上游调用；客户端还会把 502 当瞬时故障反复重试。立即透传原文回 400。
-				if imageFailFastKind(ue.Kind) {
+				if requestLevelFailFastKind(ue.Kind) {
 					status := ue.Status
 					if status < 400 {
 						status = http.StatusBadRequest
@@ -142,11 +142,10 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	writeOpenAIError(w, status, code, lastErr.Error())
 }
 
-// imageFailFastKind 报告该类上游错误是否与账号无关（换号必然同样失败）。
-//
-// 与 chat 的差别：chat 遇 ErrModelBlocked 仍换号（各账号的模型权限可能不同），出图的
-// 模型路由是**域级**配置（14401），换号无意义且实测会打满全池。
-func imageFailFastKind(kind upstream.ErrKind) bool {
+// requestLevelFailFastKind 报告该类上游错误是否与账号无关（换号必然同样失败）。
+// images 与 search 共用：出图/检索的域级模型路由（14401）、审核与参数错误都是
+// 请求本身的属性，换号只会打满全池。chat 侧另有一套（各账号模型权限可能不同）。
+func requestLevelFailFastKind(kind upstream.ErrKind) bool {
 	switch kind {
 	case upstream.ErrBadParams, upstream.ErrPromptTooLong, upstream.ErrImageInvalid,
 		upstream.ErrModelParamInvalid,
