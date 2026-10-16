@@ -26,7 +26,11 @@ func (s *Scheduler) RunStreakBonusNow() {
 			continue
 		}
 		if a.IsGlobal() {
-			continue // D4 门控：global 无 CN 任务体系，不发起任何上游调用
+			// D4 门控只覆盖 CN 成长体系（连登/补签/兑换/抽奖走 CN web base）。礼包与补偿是
+			// billing 域、按 realm 走 base，国际号实测 200——一并跳过就会静默漏领国际区活动。
+			s.claimGiftQuiet(a)
+			s.claimCompensationQuiet(a)
+			continue
 		}
 		if a.IsEnterprise() {
 			continue // 企业版门控：无成长体系（成长端点上游 403）

@@ -176,9 +176,9 @@ func compensationScheduler(t *testing.T, stub *compStub) *Scheduler {
 	return New(Config{Pool: p, Upstream: up})
 }
 
-// TestCompensationRowsGatesAndKeepsPoolOrder 门控与保序：global/企业版/禁用跳过，
-// paused **不跳过**（纯领奖与选号语义无关）；跳过的账号也出行（带原因）且不发上游请求；
-// 查询阶段绝不领取。
+// TestCompensationRowsGatesAndKeepsPoolOrder 门控与保序：企业版/禁用跳过，paused 与
+// **global 都不跳过**（补偿是 billing 域、按 realm 走 base，国际号实测 200——见
+// compSkipReason 注释）；跳过的账号也出行（带原因）且不发上游请求；查询阶段绝不领取。
 func TestCompensationRowsGatesAndKeepsPoolOrder(t *testing.T) {
 	stub := &compStub{statusBody: `{"code":0,"msg":"OK","data":{"claimed":false,"active":true,"credit_num":500,"end_time":"2026-10-22 23:59:59"}}`}
 	s := compensationScheduler(t, stub)
@@ -197,20 +197,22 @@ func TestCompensationRowsGatesAndKeepsPoolOrder(t *testing.T) {
 	for _, r := range rows {
 		byUID[r.UID] = r
 	}
-	for _, uid := range []string{"c-disabled", "d-enterprise", "e-global"} {
+	for _, uid := range []string{"c-disabled", "d-enterprise"} {
 		if !byUID[uid].Skip || byUID[uid].SkipReason == "" {
 			t.Errorf("%s 应跳过并给出原因: %+v", uid, byUID[uid])
 		}
 	}
-	if byUID["b-paused"].Skip {
-		t.Errorf("暂停选号的账号不该跳过补偿: %+v", byUID["b-paused"])
+	for _, uid := range []string{"b-paused", "e-global"} {
+		if byUID[uid].Skip {
+			t.Errorf("%s 不该跳过补偿: %+v", uid, byUID[uid])
+		}
 	}
 	if byUID["a-cn"].Error != "" || !byUID["a-cn"].Active {
 		t.Errorf("普通号应查到活动状态: %+v", byUID["a-cn"])
 	}
 	status, claim := stub.counts()
-	if status != 2 {
-		t.Errorf("状态查询次数=%d want 2（仅 a-cn 与 b-paused；被门控的不可发请求）", status)
+	if status != 3 {
+		t.Errorf("状态查询次数=%d want 3（a-cn / b-paused / e-global；被门控的不可发请求）", status)
 	}
 	if claim != 0 {
 		t.Errorf("只读查询不得领取，实际 %d 次", claim)
@@ -233,12 +235,57 @@ func TestCompensateOneClaimsOnlyPending(t *testing.T) {
 		t.Errorf("领取次数=%d want 1", claim)
 	}
 
-	skip := s.CompensateOne("e-global")
-	if !skip.Skip || skip.SkipReason == "" {
-		t.Errorf("国际区号应跳过: %+v", skip)
+	// 国际号同样可领（billing 域按 realm 走 base）：stub 说待领，就该领到。
+	row = s.CompensateOne("e-global")
+	if row.Skip || row.Error != "" || !row.Claimed || row.Credit != 500 {
+		t.Errorf("国际号应正常领取: %+v", row)
 	}
-	if _, claim := stub.counts(); claim != 1 {
+	if _, claim := stub.counts(); claim != 2 {
+		t.Errorf("领取次数=%d want 2（a-cn + e-global）", claim)
+	}
+
+	// 企业/禁用仍门控：不发任何请求。
+	skip := s.CompensateOne("d-enterprise")
+	if !skip.Skip || skip.SkipReason == "" {
+		t.Errorf("企业版应跳过: %+v", skip)
+	}
+	if _, claim := stub.counts(); claim != 2 {
 		t.Errorf("门控号不得领取，实际 %d 次", claim)
+	}
+}
+
+// TestStreakBonusGlobalRunsBillingBenefits 国际号在连登链路里仍要跑 billing 域礼包/补偿
+// （D4 门控只覆盖 CN 成长体系；一并跳过会静默漏领国际区活动 —— 线上实测 workbuddy.ai
+// 上两个端点都是 200）。
+func TestStreakBonusGlobalRunsBillingBenefits(t *testing.T) {
+	stub := &compStub{
+		statusBody:     `{"code":0,"msg":"OK","data":{"claimed":false,"active":true,"credit_num":500}}`,
+		claimBody:      `{"code":0,"msg":"OK","data":{"credit":500}}`,
+		giftStatusBody: `{"code":0,"msg":"OK","data":{"claimed":false,"active":true,"credit_num":1000}}`,
+		giftClaimBody:  `{"code":0,"msg":"OK","data":{"credit":1000}}`,
+	}
+	srv := stub.server()
+	t.Cleanup(srv.Close)
+	p := pool.New("")
+	g := &auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999}
+	auth.BackfillRealmFor(g, "global")
+	p.Add(g)
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
+	New(Config{Pool: p, Upstream: up}).RunStreakBonusNow()
+
+	status, claim := stub.counts()
+	if status != 1 || claim != 1 {
+		t.Errorf("国际号补偿 status=%d claim=%d want 1/1", status, claim)
+	}
+	if stub.giftStatusCalls != 1 || stub.giftClaimCalls != 1 {
+		t.Errorf("国际号礼包 status=%d claim=%d want 1/1", stub.giftStatusCalls, stub.giftClaimCalls)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	for path := range stub.paths {
+		if strings.Contains(path, "/activity/") {
+			t.Errorf("国际号不该发起 CN 成长域调用: %s（D4 门控仍在）", path)
+		}
 	}
 }
 

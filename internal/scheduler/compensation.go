@@ -34,17 +34,21 @@ type CompensationRow struct {
 }
 
 // compSkipReason 补偿门控（返回空串 = 可执行）：
-//   - global：D4 无 CN 任务体系，且实测该端点在国际号上恒 401（旧代码每天盲领一次、静默）；
 //   - 企业版：上游对 claim-compensation 一律 400「企业账号不支持该操作」（与 claim-gift 同批实测）；
 //   - disabled：凭证可能已失效，发起无意义。
+//
+// **global 不跳过**：补偿/礼包是 billing 域，按 realm 走 base（billingBase → workbuddy.ai）。
+// 2026-10-16 实测两个国际号在 workbuddy.ai 上 status 查询均 200
+// （{claimed:false,active:false,credit_num:1000,end_time:"2026-04-30 23:59:59"}）——此前
+// 「国际号恒 401」是把国际 token 打到 CN base 的探针假象；照那个假象跳过会在国际区活动
+// 真的开启时静默漏领。签到仍按 D4 跳过：实测 workbuddy.ai 的 daily-checkin 回
+// 400「签到活动未开启或已过期」，那是另一回事（没有活动，不是没有接口）。
 //
 // paused **不跳过**：补偿是纯领奖 RPC，与「让位防风控」的选号语义无关（旅行/成长任务亦然）。
 func compSkipReason(st pool.Status) string {
 	switch {
 	case st.Disabled:
 		return "账号已禁用"
-	case st.Realm == "global":
-		return "国际区账号不适用国内区补偿"
 	case st.Enterprise:
 		return "企业版账号无个人补偿"
 	}
@@ -136,9 +140,10 @@ func (s *Scheduler) claimGiftQuiet(a *auth.Auth) int64 {
 	label := logfmt.Label(a.UID, a.Nickname)
 	src, err := s.cfg.Upstream.GetGiftStatus(a)
 	if err != nil {
-		// 已知没有个人礼包体系的账号（global / 企业 / 已禁用）查询失败属预期，静默——
-		// 否则每天固定刷出几行噪声；CN 正常号的查询失败必须 WARN（旧盲领正是在这里无痕）。
-		if st, ok := s.cfg.Pool.Status(a.UID); ok && (st.Realm == "global" || st.Enterprise || st.Disabled) {
+		// 已知没有个人礼包体系的账号（企业 / 已禁用）查询失败属预期，静默——否则每天固定
+		// 刷出几行噪声；其余号的查询失败必须 WARN（旧盲领正是在这里无痕）。国际号不在此列：
+		// 它的礼包查询在 workbuddy.ai 上是正常 200（见 compSkipReason 注释）。
+		if st, ok := s.cfg.Pool.Status(a.UID); ok && (st.Enterprise || st.Disabled) {
 			return 0
 		}
 		log.Printf("WARN: streak-bonus %s: 礼包状态查询失败: %v", label, err)
