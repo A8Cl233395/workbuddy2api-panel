@@ -568,20 +568,36 @@ func (s *Scheduler) RunCheckinNow() {
 		// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
 		// credit_floor 判定与面板额度展示的唯一数据源）。
 		if !a.IsEnterprise() {
-			if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
+			// 先查活动状态（只读）：本机 checkin_done 只记录我们自己发起的签到，用户从手机 /
+			// 官方客户端签过就看不到；上游 today_checked_in 才是权威事实。已签则直接记账跳过
+			// （省掉 21:00 那一轮注定被幂等拒绝的写调用），顺带把连登与活动截止落进日志；
+			// active=false 说明活动已结束/未开始，提前显形。**查询失败 fail-open**——照常签到
+			// （签到自身的幂等错误标记仍是兜底判据）。
+			label := logfmt.Label(st.UID, st.Nickname)
+			act, actErr := s.cfg.Upstream.GetCheckinActivityStatus(a)
+			switch {
+			case actErr != nil:
+				log.Printf("WARN: checkin %s: 活动状态查询失败（照常签到）: %v", label, actErr)
+			case !act.Active:
+				log.Printf("WARN: checkin %s: 上游签到活动当前不生效（截止 %s），仍尝试签到", label, act.EndTime)
+			}
+			if actErr == nil && act.TodayCheckedIn {
+				s.cfg.Pool.NoteCheckinDone(st.UID)
+				log.Printf("checkin %s: 上游显示今天已签到（连登 %d 天，活动至 %s）", label, act.StreakDays, act.EndTime)
+			} else if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
 				// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
 				if upstream.IsAlreadyCheckin(err) {
 					s.cfg.Pool.NoteCheckinDone(st.UID)
-					log.Printf("checkin %s: 今天已签到（幂等）", logfmt.Label(st.UID, st.Nickname))
+					log.Printf("checkin %s: 今天已签到（幂等）", label)
 				} else {
-					log.Printf("WARN: checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+					log.Printf("WARN: checkin %s: %v", label, err)
 				}
 				// 其余业务错误也继续走余额查询
 			} else {
 				// 首次签到成功此前静默——排查「签到到底跑没跑」时无迹可循（幂等行只在
 				// 重复触发时出现），成功也落一行。
 				s.cfg.Pool.NoteCheckinDone(st.UID)
-				log.Printf("checkin %s: 签到成功", logfmt.Label(st.UID, st.Nickname))
+				log.Printf("checkin %s: 签到成功", label)
 			}
 		}
 		// 分桶查余额：配置窗口内的积分单独标记，同时记录最早未来到期批次。

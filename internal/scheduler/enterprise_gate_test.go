@@ -19,6 +19,10 @@ import (
 type recorderUpstream struct {
 	mu    sync.Mutex
 	paths []string
+	// checkinActivityBody 签到活动状态应答（空 = 与既有默认同形的空 data 对象）；
+	// checkinActivityCode 非 0 时该端点直接回错误（测 fail-open）。
+	checkinActivityBody string
+	checkinActivityCode int
 }
 
 func (r *recorderUpstream) record(p string) {
@@ -58,6 +62,16 @@ func (r *recorderUpstream) server() *httptest.Server {
 		case strings.HasSuffix(req.URL.Path, "/get-user-resource"):
 			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":` +
 				`[{"CycleCapacitySize":1000,"CycleCapacityRemain":900,"CycleCapacityUsed":100}]}}}}`))
+		case strings.HasSuffix(req.URL.Path, "/checkin-activity-status"):
+			if r.checkinActivityCode != 0 {
+				http.Error(w, `{"code":500,"msg":"boom"}`, r.checkinActivityCode)
+				return
+			}
+			body := r.checkinActivityBody
+			if body == "" {
+				body = `{"code":0,"msg":"ok","data":{}}`
+			}
+			w.Write([]byte(body))
 		default:
 			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
 		}
@@ -242,5 +256,48 @@ func TestEnterpriseGateKeepsKeepaliveAndBalance(t *testing.T) {
 	}
 	if s.cfg.Pool == nil {
 		t.Fatal("pool missing")
+	}
+}
+
+// TestCheckinSkipsWriteWhenUpstreamSaysCheckedIn 上游口径说今天已签 → 不再发签到写调用。
+// 本机 checkin_done 只记录我们自己发起的签到，用户从手机 / 官方客户端签过就看不到，
+// 上游 today_checked_in 才权威；余额查询必须照常（跳过签到 ≠ 跳过额度刷新）。
+func TestCheckinSkipsWriteWhenUpstreamSaysCheckedIn(t *testing.T) {
+	s, r := enterpriseTestScheduler(t, false)
+	r.checkinActivityBody = `{"code":0,"msg":"OK","data":{"active":true,"today_checked_in":true,` +
+		`"streak_days":17,"daily_credit":100,"end_time":"2026-10-31 23:59:59"}}`
+	s.RunCheckinNow()
+
+	for _, p := range []string{"/checkin-activity-status", "/get-user-resource"} {
+		if !r.has(p) {
+			t.Errorf("应请求 %s，实际=%v", p, r.snapshot())
+		}
+	}
+	if r.has("/daily-checkin") {
+		t.Errorf("上游已签到却仍发了签到写调用：%v", r.snapshot())
+	}
+	if st, ok := s.cfg.Pool.Status("u1"); !ok || !st.CheckinDone {
+		t.Errorf("上游已签到应记账 checkin_done：%+v ok=%v", st, ok)
+	}
+}
+
+// TestCheckinWritesWhenUpstreamSaysNotCheckedIn 上游说没签 → 照常签一次。
+func TestCheckinWritesWhenUpstreamSaysNotCheckedIn(t *testing.T) {
+	s, r := enterpriseTestScheduler(t, false)
+	r.checkinActivityBody = `{"code":0,"msg":"OK","data":{"active":true,"today_checked_in":false,"daily_credit":100}}`
+	s.RunCheckinNow()
+	if !r.has("/daily-checkin") {
+		t.Errorf("上游未签到却没发签到：%v", r.snapshot())
+	}
+}
+
+// TestCheckinFailsOpenWhenStatusQueryFails 活动状态查不到时 fail-open：照常签到——
+// 新增的只读查询不得阻断签到这条有状态链路。
+func TestCheckinFailsOpenWhenStatusQueryFails(t *testing.T) {
+	s, r := enterpriseTestScheduler(t, false)
+	r.checkinActivityCode = http.StatusInternalServerError
+	s.RunCheckinNow()
+	if !r.has("/daily-checkin") {
+		t.Errorf("状态查询失败必须照常签到（fail-open）：%v", r.snapshot())
 	}
 }
