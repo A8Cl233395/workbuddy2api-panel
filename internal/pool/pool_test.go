@@ -2170,3 +2170,33 @@ func TestReserveFreeTierExempt(t *testing.T) {
 		t.Fatalf("目录未覆盖 = 未知倍率，应保守当付费停牌: %+v", a)
 	}
 }
+
+// TestStatusReasonHiddenAfterCooldownExpires 软冷却到期后 until/coolKind/reason 字段按设计
+// 不清理（Cooldown 写、NoteSuccess 不碰），而 Status 不应再把过期 reason 透出——否则面板会把
+// 「可用」和几天前的「429 rate limit」并排显示，运维分不清是历史残留还是当前限流（issue #171-1，
+// 上游 PR #202 的同款用例）。
+func TestStatusReasonHiddenAfterCooldownExpires(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	// 冷却中：reason 正常透出。
+	p.Cooldown("u1", CoolSoft, time.Hour, "429 rate limit")
+	st, ok := p.Status("u1")
+	if !ok || !st.Cooling || st.Reason != "429 rate limit" {
+		t.Fatalf("冷却中应透出 reason: %+v ok=%v", st, ok)
+	}
+	// 冷却到期、字段残留：不再透出（until 落在过去，字段仍在）。
+	p.Cooldown("u1", CoolSoft, -time.Minute, "429 rate limit")
+	st, ok = p.Status("u1")
+	if !ok || st.Cooling {
+		t.Fatalf("到期的冷却不应算 cooling: %+v", st)
+	}
+	if st.Reason != "" {
+		t.Fatalf("过期 reason 泄漏到 Status.Reason: %q", st.Reason)
+	}
+	// 禁用态仍要透出原因（DisabledReason 走另一条路，别被上面刀掉）。
+	p.Disable("u1", "12153 session dead")
+	st, _ = p.Status("u1")
+	if !st.Disabled || st.DisabledReason == "" {
+		t.Fatalf("禁用原因必须继续透出: %+v", st)
+	}
+}
