@@ -238,3 +238,24 @@ func TestTaskSweepSkipsGatedAccounts(t *testing.T) {
 		t.Errorf("门控账号不应发起任何上游请求，实际 %d 次", f.reqs)
 	}
 }
+
+// 持锁账号（正在跑任务行为链路）整轮跳过：一个上游请求都不能发——清扫是「补漏」，
+// 不能去抢正在执行的动作，否则同一任务的 accept/claim 会和动作链交叠。解锁后下一轮
+// 自然补上（上游 PR #205 的同款用例）。
+func TestTaskSweepSkipsBusyAccount(t *testing.T) {
+	f := &sweepFake{tasks: []*sweepTask{{Code: "chat_5", Current: 5, Target: 5}}}
+	p := sweepPanel(t, f, &auth.Auth{UID: "cn-1", Nickname: "cn", AccessToken: "at"})
+
+	if !p.tryLockAccount("cn-1") {
+		t.Fatal("测试前置：应能拿到账号锁")
+	}
+	swept, msg := p.RunTaskSweepNow()
+	if swept != 0 || f.reqs != 0 || len(f.claims) != 0 {
+		t.Fatalf("持锁期间应整轮跳过：swept=%d reqs=%d claims=%v msg=%s", swept, f.reqs, f.claims, msg)
+	}
+
+	p.unlockAccount("cn-1")
+	if swept, msg = p.RunTaskSweepNow(); swept != 1 || len(f.claims) != 1 {
+		t.Fatalf("解锁后应补上：swept=%d claims=%v msg=%s", swept, f.claims, msg)
+	}
+}
