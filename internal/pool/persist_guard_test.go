@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -66,5 +67,35 @@ func TestFlushRetriesAfterFailedSave(t *testing.T) {
 	}
 	if p.dirty.Load() {
 		t.Fatal("成功落盘后 dirty 应清")
+	}
+}
+
+// TestStateFileDropsExpiredCooldownFields 账号级软冷却按墙钟到期、reason/until/cool_kind
+// 字段本身不清理（NoteSuccess 不碰），落盘时必须惰性清洗——否则过期 reason 永久留在
+// state.json 并被重启原样拾回（issue #207-4；显示层已由 statusOf 门控挡住）。
+func TestStateFileDropsExpiredCooldownFields(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.Cooldown("u1", CoolSoft, -time.Minute, "429 rate limit") // 已到期，字段残留
+	p.Cooldown("u2", CoolSoft, time.Hour, "429 rate limit")    // 仍在冷却
+
+	p.mu.Lock()
+	sf := p.stateOverviewLocked()
+	p.mu.Unlock()
+	if a := sf.Accounts["u1"]; a.Reason != "" || !a.Until.IsZero() || a.CoolKind != 0 {
+		t.Fatalf("过期冷却不应落盘: %+v", a)
+	}
+	if a := sf.Accounts["u2"]; a.Reason != "429 rate limit" || a.Until.IsZero() || a.CoolKind != CoolSoft {
+		t.Fatalf("冷却中的字段必须照常落盘: %+v", a)
+	}
+
+	// 禁用原因走同一个字段，不能被清洗掉（否则重启后看不到为什么死）。
+	p.Disable("u1", "12153 session dead")
+	p.mu.Lock()
+	sf = p.stateOverviewLocked()
+	p.mu.Unlock()
+	if a := sf.Accounts["u1"]; !a.Disabled || a.Reason != "12153 session dead" {
+		t.Fatalf("禁用原因必须落盘: %+v", a)
 	}
 }
