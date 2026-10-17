@@ -428,6 +428,12 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0)
 	var fetchErrs []string
 
+	// refresh=1：强制重探 global 目录（issue #216 现象 3）。此前按钮只是重读 1h 缓存，
+	// 上游目录变了也纹丝不动。CN 侧本来就是每请求直连上游（无缓存），无需处理。
+	if r.URL.Query().Get("refresh") == "1" {
+		p.cfg.Upstream.InvalidateGlobalModelsCache()
+	}
+
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
 	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
 	var cnAcct, globalAcct *auth.Auth // 供下方模型繁忙度复用同一批账号
@@ -540,7 +546,14 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"models": out,
+		// global_source global 目录来源（v3-desktop / v3-union / enterprise）。
+		// 前端据此提示「拿到的是回落/降级目录」——issue #216 里用户只看到「少了 11 个模型」，
+		// 完全不知道已经降级到企业端点（那份目录只有 18 条、hy4-preview 的倍率还是旧值）。
+		"global_source": p.cfg.Upstream.GlobalCatalogSource(),
+	})
 }
 
 // panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），

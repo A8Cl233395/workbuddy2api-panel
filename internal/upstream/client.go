@@ -737,8 +737,8 @@ type Client struct {
 	// 32000），Codex 等不发限额的客户端写大文件会被无声截断。与 efforts 共用锁。
 	modelMaxOut map[string]map[string]int64
 
-	// globalModels 缓存 global 模型名目录探测结果（成功 ∩ 静态 overlay；
-	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
+	// globalModels 缓存 global 模型目录探测结果（1h TTL + 5min 负缓存；
+	// 探测与合并见 global_models.go）。目录权威 = 桌面端 UA 族，见该文件注释。
 	globalModels fetchGlobalModelsCache
 
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。

@@ -647,12 +647,14 @@ function rateCell(m) {
   return m.credits ? esc(m.credits) : '—';
 }
 
-async function loadModels() {
+async function loadModels(force) {
   const tb = $('mdBody');
   tb.innerHTML = '<tr><td colspan="7"><div class="empty">正在向上游查询…</div></td></tr>';
   try {
     // 探测数据是可选增强：拉取失败不影响模型列表本身
-    const [d, pr] = await Promise.all([api('models'), api('model_probes').catch(() => ({}))]);
+    // force=true（「重新获取」按钮）：带 refresh=1 让后端清掉 global 目录 1h 缓存，
+    // 真正重新问一次上游，否则点多少次都是同一份缓存（issue #216 现象 3）。
+    const [d, pr] = await Promise.all([api('models' + (force ? '?refresh=1' : '')), api('model_probes').catch(() => ({}))]);
     mdAll = d.models || [];
     mdProbes = pr.probes || {};
     if (!mdAll.length) {
@@ -665,7 +667,10 @@ async function loadModels() {
     const probeKeys = Object.keys(mdProbes);
     mdProbeOf = id => mdProbes[id] || mdProbes[probeKeys.find(k => k.endsWith(':' + id))];
     const hit = mdAll.filter(m => mdProbeOf(m.id)).length;
-    $('mdNote').textContent = mdAll.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
+    // 目录来源：桌面端族是官方 picker 口径；union/enterprise 说明 v3 探测部分或全部失败，
+    // 拿到的是回落目录（数量偏少、倍率可能是旧值），必须在界面上说清楚。
+    const srcNote = { 'v3-desktop': '', 'v3-union': ' · ⚠ 国际版目录来自回落（IDE+CLI 并集）', 'enterprise': ' · ⚠ 国际版目录已降级到企业端点（窄目录/旧倍率）' }[d.global_source] || '';
+    $('mdNote').textContent = mdAll.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '') + srcNote;
     renderModels();
   } catch (e) {
     mdAll = [];
@@ -797,7 +802,7 @@ for (const [id, key] of [['mdRealm', 'realm'], ['mdCap', 'cap'], ['mdEffort', 'e
   el.onchange = () => { mdFilter[key] = el.value; renderModels(); };
 }
 $('mdReset').onclick = resetModelFilter;
-$('btnModels').onclick = loadModels;
+$('btnModels').onclick = () => loadModels(true);
 
 /* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
 let logCh = 'all';
