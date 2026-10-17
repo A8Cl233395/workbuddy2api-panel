@@ -31,7 +31,7 @@ const (
 	ErrNone              ErrKind = iota // 成功
 	ErrHardCredit                       // 余额不足（402 或 body 关键词）→ 长冷却
 	ErrSoftRate                         // 429 软限流 → 短冷却
-	ErrSessionDead                      // 401 + 12153 offline session 失效 → 禁用
+	ErrSessionDead                      // session 失效（401+12153，或网关 401 invalid_token）→ 连续达阈禁用，需重登
 	ErrNotFound                         // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
 	ErrServer                           // 5xx 上游故障
 	ErrContentBlocked                   // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
@@ -370,10 +370,30 @@ func hasBusinessEnvelope(body string) bool {
 
 // IsWafBlocked 报告 403 响应是否为 WAF 拦截形态：HTTP 403 且 body 无业务信封
 // （无 `"code":`/`"msg":` JSON 字段——HTML 拦截页、空体、纯文本均命中）。
-// 带业务信封的 403（11140 request illegal / 11128 等）仍走既有分类链。
+// 带业务信封的 403（11140 request illegal / 11-128 等）仍走既有分类链。
 // 403 含 accountFault 文案的维持现状（ErrAccountFault），由 Classify 的规则序保证。
 func IsWafBlocked(status int, body string) bool {
 	return status == http.StatusForbidden && !hasBusinessEnvelope(body)
+}
+
+// IsGatewayUnauthorized 报告 401 响应是否为**网关层授权拒绝页**（无业务信封）。
+//
+// 形态（2026-10-17 实测 CN 站 copilot.tencent.com /v2/*，token 被上游判无效时）：
+//
+//	HTTP/1.1 401
+//	WWW-Authenticate: Bearer realm="copilot", error="invalid_token", error_description="invalid token"
+//	Server: APISIX/3.9.1
+//	<body><html><head><title>401 Authorization Required</title>…openresty…</body>
+//
+// 与 403 WAF 页同族：都是边缘（APISIX）拦下来的 HTML 页，没有 `{"code":…}` 信封。
+// 业务层 401 一定带信封（如 code 12153 offline session），走既有 sessionDeadMarkers。
+// 判为 ErrSessionDead 的依据是本机实测：同一 token 在 /v3/config 仍 200、在 /v2/*
+// 全 401，且 refresh 端点对该 token 回 invalid_grant（Session doesn't have required
+// client / Refresh token issued before the user session started）——即「session 已被
+// 上游作废，只能重登」，不是请求头/UA/请求格式问题（同批健康的号用完全相同的一套头
+// 打 /v2/chat/completions 仍 200）。
+func IsGatewayUnauthorized(status int, body string) bool {
+	return status == http.StatusUnauthorized && !hasBusinessEnvelope(body)
 }
 
 // retryAfterHeaderCandidates 冷却时长优先解析的响应头候选序列：
@@ -519,6 +539,9 @@ func ParseRateReset(body string) (time.Time, bool) {
 //  10. IsWafBlocked —— 403 且无业务信封（HTML 拦截页/空体/纯文本）：APISIX WAF
 //     拦截形态。判在通用 4xx 兜底**之前**：此前该形态落 ErrClient → 只换号不罚 →
 //     连环 403。带业务信封的 403 已被上方各层捕获，走不到本层。
+//  10.5 IsGatewayUnauthorized —— 401 且无业务信封（APISIX HTML 授权拒绝页）：
+//     token 被上游判无效，refresh 亦回 invalid_grant ⇒ session 已作废。同上，落
+//     ErrClient 会让死号永久留在池里反复被选中，故归 ErrSessionDead。
 //  11. 11133 model_param_invalid / 11135 invalid_image_data —— 模型供应商拒绝参数、
 //     图片数据无效：确定性请求级 400（同 body 换号结果不变），判在内容策略/参数
 //     错误/通用 4xx 之前，避免落 ErrClient 把健康号轮转一遍。
@@ -614,6 +637,14 @@ func Classify(status int, body string) ErrKind {
 	// 带信封的 403 在上方各层已有权威分类，不受影响。
 	if IsWafBlocked(status, body) {
 		return ErrWafBlock
+	}
+	// 网关 401（APISIX/openresty HTML 页，无业务信封）：token 被上游判无效。
+	// 实测同 token 在 /v3/config 仍 200、在 /v2/* 全 401，refresh 回 invalid_grant
+	// ⇒ session 已被作废，只能重登。落 ErrClient（旧行为）的代价是「只换号不罚」：
+	// 死号永远留在池里，每个请求都再打一遍、日志里刷出一串 401（2026-10-17 现场：
+	// 18 个号里 16 个已死，一次请求打空一整排）。
+	if IsGatewayUnauthorized(status, body) {
+		return ErrSessionDead
 	}
 	// 图片格式/数据错误是确定性的请求级错误：同 body 换账号结果不变，直接
 	// fail-fast，避免把健康账号轮转一遍后仍把最终 503 返回给客户端。

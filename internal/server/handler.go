@@ -113,6 +113,11 @@ func (h *Handler) softCooldown() time.Duration {
 // 故固定 60s 防雪崩即可，不随 soft_rate 配置、也不参与软退避指数。
 const notFoundCooldown = 60 * time.Second
 
+// gatewayUnauthorizedReason 网关 401（无效 token）达阈禁用时写入 state.json 的 reason。
+// 与 12153 分开写：面板的「禁用原因」是运维第一手线索——看到 12153 会去查 refresh
+// 链路，而网关 401 是 token 被边缘直接判无效，只能重新登录。
+const gatewayUnauthorizedReason = "401 invalid token (re-login required)"
+
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
 // 宿主（如 workbuddy-switch 托管网关子进程）探测同端口的旧服务/其他服务时，对方即使
 // 返回 2xx 也不带本标识，宿主据此可识别"假成功"。
@@ -1564,6 +1569,19 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		}
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
+		// 两种形态同属「session 已死，只能重登」，但成因不同、处置强度也不同：
+		//   - 业务码 12153（refresh 端点/应用层明说 offline session 失效）→ 一次即禁。
+		//   - 网关 401 invalid_token（APISIX HTML 页，无业务信封）→ **连续阈值** 才禁。
+		//     理由同 pool.NoteSessionDead 的误杀复盘：边缘节点抖动也会回 401 HTML，
+		//     一次就禁会在上游抖一下时把整池打光（这个坑本项目踩过一次）。死号在阈值
+		//     内仍会被选中重试，但最多 3 次即出池，不再每请求刷 401。
+		if uerr != nil && upstream.IsGatewayUnauthorized(uerr.Status, body) {
+			if h.cfg.Pool.NoteSessionDeadWith(uid, gatewayUnauthorizedReason) {
+				log.Printf("WARN: [server] 账号 %s 连续 %d 次网关 401（token 被上游判无效）→ 禁用，需重新登录",
+					logfmt.Label(uid, ""), pool.SessionDeadThreshold())
+			}
+			return
+		}
 		h.cfg.Pool.Disable(uid, "12153 session dead")
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：

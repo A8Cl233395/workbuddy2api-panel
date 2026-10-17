@@ -125,6 +125,16 @@ func TestClassify(t *testing.T) {
 		// 非 403 的无信封错误体不进 WAF 分类（WAF 判定绑定 403 形态）。
 		{400, `bad request`, ErrClient},
 		{429, ``, ErrSoftRate},
+		// 网关 401（APISIX `invalid_token` 页，无业务信封）→ session 死亡，需重登。
+		// 夹具是 2026-10-17 实测原文（CN 站 /v2/chat/completions，token 被上游作废）。
+		// 旧行为落 ErrClient（只换号不罚）⇒ 死号永久留在池里，每请求刷一排 401。
+		{401, "<html><head><title>401 Authorization Required</title></head><body><center><h1>401 Authorization Required</h1></center><hr><center>openresty</center><p><em>Powered by APISIX.</em></p></body></html>", ErrSessionDead},
+		{401, ``, ErrSessionDead},
+		{401, `Unauthorized`, ErrSessionDead},
+		// 业务层 401 带信封的维持既有语义：12153 仍是 session 死亡；
+		// 其他业务码不劫持（不许把网关 401 的判定扩张到带信封的响应）。
+		{401, `{"code":12153,"msg":"12153:refresh token is invalid"}`, ErrSessionDead},
+		{401, `{"code":1,"msg":"unknown business error"}`, ErrClient},
 		// 6021「queue.full.title」渠道级准入队列满：任意状态码都判 upstream_busy
 		//（防上游换状态码），结构化 code 主判、requestId 含 "6021" 不误伤。
 		{429, `{"code":6021,"msg":"queue.full.title","requestId":"341738971737c911985e5b9e67a4eceb"}`, ErrUpstreamBusy},
