@@ -10,7 +10,10 @@
 - 不要打 `v1.x` 标签，也不要手改 `appVersion`
 
 ```bash
+# 注意：本机（Windows / git-bash）没有 tzdata，`TZ=Asia/Shanghai date` 会**静默回落 UTC**，
+# 打出来的标签整整早 8 小时。用显式加 8 小时，兼容有无 tzdata 两种环境：
 VERSION=$(TZ=Asia/Shanghai date +%Y.%-m.%-d.%-H%M)
+[ "$(TZ=UTC date +%H)" = "$(TZ=Asia/Shanghai date +%H)" ] && VERSION=$(date -u -d '+8 hours' +%Y.%-m.%-d.%-H%M)
 git tag "v$VERSION"
 git push origin "v$VERSION"
 ```
