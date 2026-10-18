@@ -85,6 +85,19 @@ jobs:
           PY
           pi --list-models
       - run: python3 -m pip install --quiet pyyaml
+      - name: 探活模型网关
+        # 网关/模型名不通时会在 agent 里挂满 25 分钟才超时，这里先 90 秒问一次
+        env:
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          code=$(curl -s -o /tmp/probe.json -w '%{http_code}' -m 90 -X POST "$LLM_BASE_URL/chat/completions" \
+            -H "Authorization: Bearer $LLM_API_KEY" -H 'Content-Type: application/json' \
+            -d "{\"model\":\"$LLM_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}")
+          echo "HTTP $code"; head -c 400 /tmp/probe.json; echo
+          [ "$code" = "200" ] || { echo "网关不可用：$LLM_BASE_URL / $LLM_MODEL"; exit 1; }
+
       - name: 分析这一片
         # 指定单仓时只有第 0 片干活，其余跳过（job 级 if 引用不了 matrix，只能放这里）
         if: inputs.repo == '' || startsWith(matrix.shard, '0/')

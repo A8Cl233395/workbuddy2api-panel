@@ -51,8 +51,10 @@ def pi(task, timeout):
             code, out = run("pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
                             "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
                             task, check=False, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return 124, "超时"
+        except subprocess.TimeoutExpired as e:
+            # 超时也要留下 agent 最后说的话，否则完全看不出卡在哪一步
+            keep = ((e.stdout or "") + (e.stderr or "")).strip().splitlines()[-2:]
+            return 124, ("超时｜" + " / ".join(keep))[:300]
         tail = " / ".join((out.strip().splitlines() or [""])[-2:])[:300]
         if code == 0 or "429" not in tail:
             return code, tail
