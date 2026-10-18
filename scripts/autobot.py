@@ -1,48 +1,33 @@
 #!/usr/bin/env python3
-"""AutoBot：挑一条上游改动 → 适配到本仓 → 跑测试 → 提 PR 给人审。
+"""AutoBot：把参考仓库的实现读成「本仓可以借鉴什么」，写成 PR 供人审。
 
-两条实施路径，同一道测试闸：
-  1. git cherry-pick -x —— 原样移植。最便宜，能落就落。
-  2. LLM 适配 —— cherry-pick 冲突时，把上游 diff + 本仓现有文件喂给模型，让它改写成本仓
-     能用的补丁。本仓多数改动是「改写实现」，原样移植必然冲突，这条路才是常态。
-     补丁由 git apply --3way 落地，能不能留仍由 go test 判定。
+两个阶段，可分开跑也可一次跑完：
+  analyze    每个参考仓库 clone 到 /tmp/up/<slug>，agent 读代码写差异报告
+  implement  按报告自评的值得度排序，取前 N 条让 agent 写 Go 实现并开 PR
 
-安全线（AutoBot.yml 的 never 在这里落地）：不推 main、不合并、不打 tag、不发版，
-不改 workflows/AGENTS.md/config.example.json。任何一步失败只出报告、不开 PR。
-
-用法：
-    python3 scripts/autobot.py                     # 用 AutoBot.yml 里的上游
-    python3 scripts/autobot.py --repo owner/name   # 临时看别的仓库（可给完整 URL）
-    python3 scripts/autobot.py --dry-run           # 只列候选与判定，不落地不推送
+硬约束：只推 autobot/* 分支，绝不 push main；提交身份是 GitHub Actions bot。
 """
-
 import argparse
-from datetime import date
+import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
 
 import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORT = os.path.join(ROOT, "autobot-report.md")
+REPORT_DIR = "/tmp/autobot-reports"
+UP_DIR = "/tmp/up"
 FORBIDDEN = {".github/workflows/", "AGENTS.md", "config.example.json"}
-PATCH = "/tmp/autobot.patch"
-# 自动化产出的提交用机器人身份；就近用 -c 传给单条命令，**不写 git config**——
-# 写仓库配置会污染本机手写的提交（2026-10-18 事故：3 个提交变成了 autobot）。
-_pi_deadline = None  # 本轮 PI 时间预算截止（秒），跨候选共享
+# 只在自产提交上用 -c 传身份；写 git config 会污染本机手写提交（真出过事故）
 BOT = ("-c", "user.name=github-actions[bot]",
        "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com")
 
 
 def run(*args, check=True, timeout=None):
-    """跑命令。check=False 时返回 (code, 输出)。"""
     p = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
     if check and p.returncode != 0:
         raise RuntimeError(f"{' '.join(args)} 失败: {p.stderr.strip()[:400]}")
@@ -51,139 +36,99 @@ def run(*args, check=True, timeout=None):
 
 def say(lines, text=""):
     lines.append(text)
-    print(text)
+    print(text, flush=True)
 
 
-def llm(base, key, model, prompt):
-    """一次 OpenAI 兼容调用。失败抛异常（调用方降级成只出报告）。"""
-    body = json.dumps({"model": model, "temperature": 0,
-                       "messages": [{"role": "user", "content": prompt}]}).encode()
-    req = urllib.request.Request(
-        base.rstrip("/") + "/chat/completions", data=body,
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+def pi(task, timeout):
+    """跑一次 PI：cwd=本仓，默认系统提示词与上下文，不做裁剪。"""
     try:
-        with urllib.request.urlopen(req, timeout=300) as r:
-            return json.loads(r.read())["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        # 只留 "HTTP Error 400" 等于没报错：网关的错误体（duck.ai 的 ERR_BAD_REQUEST
-        # 之类）才是可行动的信息，截 400 字节带出去。
-        raise RuntimeError(f"HTTP {e.code}: " + e.read()[:400].decode("utf-8", "replace")) from None
-
-
-def pick_json(text):
-    """从模型回复里抠出第一个 JSON 对象（有些模型会裹 ```json 围栏）。"""
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        raise ValueError("模型回复里没有 JSON")
-    return json.loads(m.group(0))
-
-
-def strip_fence(text):
-    """去掉 ```diff / ``` 围栏，返回纯补丁文本。"""
-    m = re.search(r"```(?:diff|patch)?\n(.*?)```", text, re.S)
-    return (m.group(1) if m else text).strip() + "\n"
-
-
-def verdict_of(out):
-    """解析模型的四档判定：返回 (verdict, why, patch 正文)。解析不出来按 skip 处理。"""
-    try:
-        d = pick_json(out)
-    except Exception:  # noqa: BLE001
-        return "skip", "回复不是 JSON：" + out[:120].replace("\n", " "), "", ""
-    v = str(d.get("verdict") or "skip").strip().lower()
-    why = str(d.get("why") or "").strip()
-    body = strip_fence(str(d.get("patch") or "")).strip()
-    mp = str(d.get("mapping") or "").strip()
-    return v, why or "（模型未给原因）", (body + "\n") if body else "", mp
-
-
-def tracked_files():
-    return set(run("git", "ls-tree", "-r", "--name-only", "HEAD").splitlines())
-
-
-def finish(sha, lines, mode, mp=""):
-    """落地前的公共闸门：外星文件、孤儿实现、build/vet/test，全绿才提交。"""
-    # 兄弟项目的补丁可能整份搬 Python 进来：go test 照样全绿，但那只是垃圾文件
-    # 用 status 而不是 diff：git apply --3way 会把改动写进 index，diff 看不见；
-    # status 同时覆盖已暂存与未跟踪。已是本仓既有文件的（比如面板 js/html）放行，
-    # 新出现的非 Go 文件一律算外星文件。
-    tracked = set(run("git", "ls-tree", "-r", "--name-only", "HEAD").splitlines())
-    alien = [l[3:] for l in run("git", "status", "--porcelain", "-uall").splitlines()
-             if l[3:] not in tracked and not l[3:].endswith((".go", ".md"))]
-    if alien:
-        run("git", "reset", "-q", "--hard", "HEAD")
-        run("git", "clean", "-qfd")
-        say(lines, f"  {sha}: 补丁引入非 Go 文件 {alien[:5]}，丢弃。")
-        return False, ""
-    if mode == "port":
-        # 只新增、没接线 = 孤儿实现：能编译能过测试，但没有任何行为改变
-        changed = [l[3:] for l in run("git", "status", "--porcelain", "-uall").splitlines()]
-        new_only = [f for f in changed if f not in tracked_files()]
-        if new_only and len(new_only) == len(changed):
-            run("git", "reset", "-q", "--hard", "HEAD")
-            run("git", "clean", "-qfd")
-            say(lines, f"  {sha}: 只新增 {new_only}、没有接线到既有文件，丢弃。")
-            return False, ""
-    # 跨语言重写先过编译与 vet（后面的 go test 是两条路径共用的闸）
-    for cmd in (["go", "build", "./..."], ["go", "vet", "./..."]):
-        if mode == "port":
-            code, msg = run(*cmd, check=False)
-            if code != 0:
-                run("git", "reset", "-q", "--hard", "HEAD")
-                run("git", "clean", "-qfd")
-                say(lines, f"  {sha}: {' '.join(cmd[1:])} 未通过：\n```\n" + msg[-1200:] + "\n```")
-                return False, ""
-    code, msg = run("go", "test", "./...", check=False)
-    if code != 0:
-        run("git", "reset", "-q", "--hard", "HEAD")
-        run("git", "clean", "-qfd")
-        say(lines, f"  {sha}: 适配后测试未通过：\n```\n" + msg[-1200:] + "\n```")
-        return False, ""
-    run("git", "add", "-A")
-    # 无改动时 commit 的失败信息走 stdout、stderr 为空，check=True 抛出的异常会把整轮跑挂
-    if run("git", "diff", "--cached", "--quiet", check=False)[0] == 0:
-        say(lines, f"  {sha}: 全部闸门通过但没有任何改动，跳过。")
-        return False, ""
-    run("git", *BOT, "commit", "-q", "-m", f"autobot: 适配上游 {sha}（LLM 改写，非原样移植）")
-    return True, mp
-
-def up_clone(src):
-    """把上游仓完整 clone 到 /tmp/up/<slug>，供 agent 读整体实现。
-
-    只对已选中要落地的候选调用：65 个仓全 clone 太慢，分诊阶段看清单就够了。
-    """
-    slug = src.replace("/", "__")
-    d = os.path.join("/tmp/up", slug)
-    if os.path.isdir(os.path.join(d, ".git")):
-        run("git", "-C", d, "fetch", "-q", "--depth", "200", "origin", check=False)
-        return d
-    os.makedirs("/tmp/up", exist_ok=True)
-    code, msg = run("git", "clone", "-q", "--depth", "200",
-                    f"https://github.com/{src}.git", d, check=False)
-    if code != 0:
-        return ""
-    return d
+        code, out = run("pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
+                        "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
+                        task, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, "超时"
+    return code, " / ".join((out.strip().splitlines() or [""])[-2:])[:300]
 
 
 def up_clone(src):
-    """上游仓完整 clone 到 /tmp/up/<slug>，供 agent 读整体实现。
-
-    只对已选中要落地的候选调用：65 个仓全 clone 太慢，分诊阶段看清单就够。
-    """
-    d = os.path.join("/tmp/up", src.replace("/", "__"))
+    """上游仓完整 clone 到 /tmp/up/<slug>；已存在就浅拉一次更新。"""
+    d = os.path.join(UP_DIR, src.replace("/", "__"))
     if os.path.isdir(os.path.join(d, ".git")):
         run("git", "-C", d, "fetch", "-q", "--depth", "200", "origin", check=False)
         return d
-    try:
-        os.makedirs("/tmp/up", exist_ok=True)
-    except OSError:
-        return ""
-    code, _ = run("git", "clone", "-q", "--depth", "200", f"https://github.com/{src}.git", d, check=False)
+    os.makedirs(UP_DIR, exist_ok=True)
+    code, _ = run("git", "clone", "-q", "--depth", "200",
+                  f"https://github.com/{src}.git", d, check=False)
     return d if code == 0 else ""
 
 
+def report_path(src):
+    return os.path.join(REPORT_DIR, src.replace("/", "__") + ".md")
+
+
+def report_score(text):
+    """报告自评的值得度；没写就按 0（宁可不落地）。"""
+    m = re.search(r"值得度\s*[:：]\s*([0-3])", text)
+    return int(m.group(1)) if m else 0
+
+
+def analyze(src, lines):
+    """clone → agent 读代码 → 差异报告。返回报告路径（失败为 ""）。"""
+    up = up_clone(src)
+    if not up:
+        say(lines, f"{src}: clone 失败")
+        return ""
+    os.makedirs(REPORT_DIR, exist_ok=True)
+    rp = report_path(src)
+    task = (
+        f"上游仓库 {src} 已完整 clone 在 `{up}`（只读参考）。本仓是 WorkBuddy 的 Go 网关（当前目录）。\n"
+        "任务：分析这个上游仓库与本仓的实现差异——它有哪些本仓还没有的功能、修过的 bug、"
+        "更好的实现，哪些值得借鉴，以及要怎么适配到本仓。\n"
+        "只读：不要修改本仓任何文件、不要 commit、不要 push。\n"
+        f"把结论写进 `{rp}`，严格用这个格式：\n"
+        "值得度: 0-3（0=没有可借鉴；3=本仓明确缺这个能力）\n"
+        "功能: 上游有什么，解决什么问题\n"
+        "差异: 本仓现状（文件:函数）对比上游\n"
+        "适配: 要改本仓哪个 文件:函数，怎么改（能给 Go 代码草图更好）\n"
+        "优缺点: 这个改法的好处与代价\n"
+        "影响: 对现有行为/配置/性能的影响与风险\n"
+    )
+    code, out = pi(task, int(os.environ.get("PI_ANALYZE_TIMEOUT") or 1500))
+    if not os.path.isfile(rp):
+        say(lines, f"{src}: agent 未产出报告（退出码 {code}）｜{out}")
+        return ""
+    say(lines, f"{src}: 分析完成 值得度={report_score(open(rp, encoding='utf-8').read())}")
+    return rp
+
+
+def implement(src, idea, lines):
+    """按报告里的适配方案在本仓写 Go 实现。返回 (是否成功, PR 正文材料)。"""
+    up = up_clone(src)
+    task = (
+        (f"上游仓库 {src} 已完整 clone 在 `{up}`（只读参考）。\n" if up else "")
+        + "本仓是 Go 项目（当前目录）。上一轮分析的结论：\n"
+        f"---\n{idea}\n---\n\n"
+        "在本仓用 Go 实现同样的行为，接进真实的调用路径。\n"
+        "要求：至少修改一个既有 .go 文件；自己跑 `go build ./...`、`go vet ./...`、"
+        "`go test ./...` 全绿；补一条能钉住该行为的测试。\n"
+        "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
+        "完成后在本仓根目录写 autobot-pr.md，只含这五行：\n"
+        "问题: 上游解决什么问题，本仓有没有同类问题\n"
+        "改动: 你做了什么\n"
+        "位置: 本仓改到的 文件:函数\n"
+        "优缺点: 好处与代价\n"
+        "影响: 对现有行为/配置/性能的影响与风险\n"
+    )
+    code, out = pi(task, int(os.environ.get("PI_IMPLEMENT_TIMEOUT") or 2400))
+    changed = run("git", "status", "--porcelain", "-uall", check=False)[1].strip()
+    if code != 0 or not changed:
+        say(lines, f"{src}: 实现未产出（退出码 {code}）｜{out}")
+        return False, ""
+    return True, read_summary()
+
+
 def read_summary():
-    """PI 写的 PR 正文材料；读完即删，别让它混进提交。"""
+    """agent 写的 PR 正文材料；读完即删，别让它混进提交。"""
     f = os.path.join(ROOT, "autobot-pr.md")
     if not os.path.isfile(f):
         return ""
@@ -192,336 +137,107 @@ def read_summary():
     return text
 
 
-def pi_port(sha, lines, model, src="", up_path=""):
-    """把一个上游提交交给 PI：读上游完整实现 → 用 Go 写等价实现 → 自测。
-
-    与手动用 PI 的链路一致：给它的不是一段 diff，而是上游仓库的完整代码。
-    """
-    head = f"本仓是 Go 项目。上游 {src or sha} 是另一种语言的实现（多为 Python）。\n"
-    if up_path:
-        head += (f"上游仓库已完整 clone 在 `{up_path}`（只读参考）：先在那里 `git show {sha}` "
-                 f"看这个提交，再 grep 相关模块读懂周边上下文。\n")
-    else:
-        head += f"用 `git show {sha}` 看它改了什么。\n"
-    task = head + (
-        "读懂它修正或新增的行为，在本仓用 Go 实现同样的行为，并接进真实的调用路径。\n"
-        "要求：至少修改一个既有 .go 文件；自己跑 `go build ./...`、`go vet ./...`、"
-        "`go test ./...` 全绿；补一条能钉住该行为的测试。\n"
-        "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
-        "完成后在本仓根目录写一份 autobot-pr.md，只包含这五行（不要别的话）：\n"
-        "问题: 上游这个提交修的是什么问题、本仓有没有同类问题\n"
-        "改动: 你做了什么\n"
-        "位置: 本仓改到的 文件:函数\n"
-        "优缺点: 这个改法的好处与代价\n"
-        "影响: 对现有行为/配置/性能的影响与风险\n"
-    )
-    models = [m.strip() for m in (os.environ.get("PI_MODELS") or model).split(",") if m.strip()] or [model]
-    global _pi_deadline
-    if _pi_deadline is None:
-        _pi_deadline = time.time() + int(os.environ.get("PI_BUDGET_SEC") or 5400)
-    for i in range(3):
-        if time.time() > _pi_deadline:
-            say(lines, f"  {sha}: 本轮 PI 时间预算已用完，跳过。")
-            return False, "", ""
-        m = models[i % len(models)]
-        try:
-            code, out = run("pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
-                            "--model", m, "--no-session", "--approve", task,
-                            check=False, timeout=1800)
-        except subprocess.TimeoutExpired:
-            code, out = 124, "超时（30 分钟）"
-        if code == 0 and run("git", "status", "--porcelain", "-uall", check=False)[1].strip():
-            say(lines, f"  {sha}: PI 产出改动（{m}）")
-            return True, read_summary(), read_summary()
-        run("git", "checkout", "-q", "--", "autobot-pr.md", check=False)
-        tail = " / ".join((out.strip().splitlines() or [""])[-3:])[:400]
-        say(lines, f"  {sha}: 第 {i + 1} 次未产出（{m}，退出码 {code}）｜{tail}")
-        run("git", "reset", "-q", "--hard", "HEAD", check=False)
-        run("git", "clean", "-qfd", check=False)
-    return False, "", ""
-
-
-def read_summary():
-    """PI 写的 PR 正文材料；读完即删，别让它混进提交。"""
-    p = os.path.join(ROOT, "autobot-pr.md")
-    if not os.path.isfile(p):
-        return ""
-    text = open(p, encoding="utf-8").read().strip()
-    os.remove(p)
-    return text
-
-
-def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt", src=""):
-    """让模型把上游提交改写成本仓能用的补丁，提交到 branch。返回 (是否成功, 行为映射)。"""
-    run("git", "checkout", "-q", "-B", branch, base)
-    if mode == "port" and shutil.which("pi"):
-        ok, summary = pi_port(sha, lines, model, src, up_clone(src))
-        if not ok:
-            return False, ""
-        ok, mp = finish(sha, lines, mode, summary)
-        return ok, (summary or mp)
-    diff = run("git", "show", "--format=", sha)
-    files = run("git", "show", "--name-only", "--format=", sha).split()
-    excerpts = []
-    for f in files[:3]:
-        fp = os.path.join(ROOT, f)
-        if os.path.isfile(fp):
-            excerpts.append(f"--- 本仓现有 {f}（节选） ---\n" + open(fp, encoding="utf-8").read()[:2500])
-        else:
-            excerpts.append(f"--- {f} 在本仓不存在（新文件，或本仓实现在别处） ---")
-
-    # port：上游是另一种语言（通常 Python），本仓是 Go。任务不是搬代码，是读逻辑→Go 重写→接线。
-    port_head = (
-        f"上游 {sha} 是另一种语言的实现，本仓是 Go。**不要因为「本仓没有 xxx.py」就跳过**——"
-        "那正是本任务的前提。你要做的是：读懂这个提交修正/新增了什么行为，然后在本仓用 Go 实现同样的行为，"
-        "并接进真实调用路径。\n"
-        "硬性要求：\n"
-        "1. 必须修改至少一个本仓既有 .go 文件，把新逻辑接进去；只新增文件、没有任何既有文件被改，视为孤儿实现，会被丢弃。\n"
-        "2. 风格跟随邻近代码（错误处理、日志、命名、单测），不要引入新依赖。\n"
-        "3. mapping 写清「上游函数/文件 → 本仓文件:函数」，供人审。\n\n"
-        "输出**一个 JSON 对象**，不要别的话：\n"
-        '{"verdict": "port|already_have|skip",\n'
-        ' "why": "一到两句：上游改的是什么行为、本仓现状",\n'
-        ' "mapping": "signin.py:run_growth → internal/scheduler/growth.go:RunGrowth",\n'
-        ' "patch": "unified diff（含 diff --git/---/+++/@@；新文件用 new file mode 100644）"}\n'
-        "already_have 要给本仓文件:函数作为依据；skip 只在依赖本仓根本没有的抽象（如前端、外部服务）时才用。\n\n")
-
-    def build(diff_cap, ex_cap):
-        return (port_head if mode == "port" else "") + ("下面是一个上游提交的 diff。本仓是它的长期 fork，同一功能往往已有**另一种实现**，"
-                "所以原样移植必然冲突——这正是要你做的事：判断本仓现状，再只补缺的那部分。\n\n"
-                "输出**一个 JSON 对象**，不要别的话：\n"
-                "{\"verdict\": \"adapt|partial|already_have|skip\",\n"
-                " \"why\": \"一到两句：本仓现状是什么、依据是什么\",\n"
-                " \"patch\": \"unified diff（仅 adapt/partial 时给；否则空串）\"}\n\n"
-                "四档含义：\n"
-                "- adapt：整条都能搬，改写成本仓风格；\n"
-                "- partial：本仓已实现一部分（说清是哪部分），patch **只包含缺口**——这是常态，"
-                "上游常把多个修复塞进一条提交；\n"
-                "- already_have：目的已由本仓其他代码达成，说清在哪个文件/函数；\n"
-                "- skip：依赖本仓没有的抽象，或改动对本仓无意义，说清缺什么。\n"
-                "patch 必须是 `git apply --3way` 能直接用的 unified diff（含 diff --git / --- / +++ / @@）。\n\n"
-                f"===== 上游 diff（{sha}）=====\n{diff[:diff_cap]}\n\n" + "\n\n".join(ex_cap))
-
-    # 网关（duck.ai 系）对超长 prompt 直接 400，且不告诉你为什么：先按常规尺寸试，
-    # 失败了就砍到只剩 diff 再来一次。两次都失败才放弃这条候选。
-    out = None
-    # 降采样时不能把节选全砍掉：没有本仓上下文，模型只能回「无法判断哪些已有替代实现」
-    # （真实日志就是这么 skip 的）。留一份 800 字的最小节选，够它认「这条已经做过了」。
-    tiny = [e[:800] for e in excerpts[:1]]
-    for i, (cap, ex) in enumerate(((30000, excerpts), (6000, tiny))):
-        try:
-            out = llm(base_url, key, model, build(cap, ex))
-            break
-        except Exception as e:  # noqa: BLE001
-            say(lines, f"  {sha}: 第 {i + 1} 次适配调用失败：{e}")
-    if out is None:
-        return False, ""
-    verdict, why, body, mp = verdict_of(out)
-    say(lines, f"  {sha}: 判定={verdict} — {why}")
-    if verdict in ("skip", "already_have") or not body.strip():
-        return False, ""
-    with open(PATCH, "w", encoding="utf-8") as f:
-        f.write(body)
-    code, msg = run("git", "apply", "--3way", PATCH, check=False)
-    if code != 0:
-        # 模型给的 diff 常在 hunk 头上写错行数（「corrupt patch」），--recount 让 git 重算；
-        # 真冲突（context 不匹配）它救不了，那就是摘要节选不够，得换人看。
-        code, msg = run("git", "apply", "--recount", "-C1", PATCH, check=False)
+def finish(src):
+    """落地闸：外星文件、孤儿实现、build/vet/test 全绿才提交。返回 (ok, 说明)。"""
+    status = run("git", "status", "--porcelain", "-uall", check=False)[1].strip()
+    if not status:
+        return False, "没有改动"
+    tracked = set(run("git", "ls-tree", "-r", "--name-only", "HEAD").splitlines())
+    changed = [l[3:] for l in status.splitlines()]
+    alien = [f for f in changed if f not in tracked and not f.endswith((".go", ".md"))]
+    if alien:
+        return False, f"引入非 Go 文件 {alien[:5]}"
+    # 只新增文件、没接线到既有代码 = 孤儿实现：能编译过测试，但行为没变
+    if all(f not in tracked for f in changed):
+        return False, f"只新增 {changed[:5]}、未接线到既有文件"
+    for cmd in (["go", "build", "./..."], ["go", "vet", "./..."], ["go", "test", "./..."]):
+        code, out = run(*cmd, check=False)
         if code != 0:
-            say(lines, f"  {sha}: 补丁应用失败：\n```\n" + msg[:600] + "\n```")
-            return False, ""
-    return finish(sha, lines, mode, mp)
+            return False, f"{' '.join(cmd[1:])} 未通过：{out[-600:]}"
+    run("git", "add", "-A")
+    run("git", *BOT, "commit", "-q", "-m", f"autobot: 借鉴 {src} 的实现（agent 改写，非原样移植）")
+    return True, ""
 
 
-def fetch_upstream(src):
-    """拉上游，返回 (默认分支, 错误信息)。"""
-    run("git", "remote", "remove", "src", check=False)
-    run("git", "remote", "add", "src", f"https://github.com/{src}.git")
-    # 默认分支不一定是 main（清单里有 8 个是 master），问一次远端
-    code, out = run("git", "ls-remote", "--symref", "src", "HEAD", check=False)
-    m = re.search(r"ref: refs/heads/(\S+)\s+HEAD", out or "")
-    branch = m.group(1) if m else "main"
-    code, msg = run("git", "fetch", "-q", "src", branch, check=False)
-    return (None, msg) if code != 0 else (branch, "")
-
-
-def candidates_of(branch, up, pol, limit=12):
-    """未处理过的候选：去 merge/chore/已吸收（patch-id）/已试过（分支名）。"""
-    log = run("git", "log", f"--max-count={up['limit']}", "--no-merges",
-              "--format=%h%x09%ad%x09%s", "--date=short", f"src/{branch}")
-    cands = [l.split("\t", 2) for l in log.splitlines()
-             if l.strip() and not re.match(r"\s*chore", l.split("\t", 2)[2])]
-    # git cherry 用 patch-id 挡掉「逐字节等同」的移植；改写实现的挡不住，交给适配路径。
-    applied = {l[2:9] for l in run("git", "cherry", "-v", "HEAD", f"src/{branch}").splitlines()
-               if l.startswith("- ")}
-    cands = [c for c in cands if c[0] not in applied]
-    tried = set(run("git", "ls-remote", "--heads", "origin", pol["branch_prefix"] + "*").split())
-    cands = [c for c in cands if f"refs/heads/{pol['branch_prefix']}{c[0]}" not in tried]
-    return cands[:limit]
-
-
-def listing_of(src, cands, cap=300):
-    """每条一行：仓库 sha 日期 标题 | 改动文件。文件列表要截——大仓一次改上千个文件，
-    6 个仓的清单能把 512K 上下文直接顶爆（实测 49 万 token 被拒）。"""
-    rows = []
-    for sha, date, subj in cands:
-        files = run("git", "show", "--stat=0", "--name-only", "--format=", sha).replace("\n", ",")
-        if len(files) > cap:
-            files = files[:cap] + "…"
-        rows.append(f"- {src} {sha} {date} {subj} | {files}")
-    return rows
-
-
-def judge(srcs, cands_by_src, up, pol, lines, top):
-    """让模型挑值得吸收的提交。一轮把多个仓库的清单合并喂，省调用次数。"""
-    key, base_url, model = (os.environ.get("LLM_API_KEY", ""), os.environ.get("LLM_BASE_URL", ""),
-                            os.environ.get("LLM_MODEL", ""))
-    known, modes = {}, {}
-    for src in srcs:
-        modes[src] = "cherry-pick" if src == up["repo"] else up.get("repos_mode", pol["mode"])
-        known[src] = {c[0] for c in cands_by_src[src]}
-    if not (key and base_url and model):
-        say(lines, "未配置 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL：只出候选清单，不开 PR。")
-        say(lines, "\n".join(rows))
-        return []
-    other = [s for s in srcs if modes[s] != "cherry-pick"]
-    note = ("注意：" + "、".join(other) + " 是另一套实现（语言/结构不同），代码不能直接搬，"
-            "只能借鉴思路与接口设计；只有能说清「本仓对应模块在哪、怎么改」时才算值得挑。\n") if other else ""
-    head = (
-        note + "你在给一个 fork 筛选值得吸收的上游提交。本仓是 workbuddy2api-panel 的长期 fork，"
-        "缓存键、补偿、检索、签到、面板、调度都有自有实现。\n"
-        "每条格式：`- 仓库 sha 日期 标题 | 改动文件`。按值得程度挑**最多 %d 条**："
-        "优先真 bug 修复与行为缺失、改动小、目的清晰；纯样式/CI/文档改动跳过。\n"
-        "输出 JSON：{\"picks\":[{\"repo\":\"owner/name\",\"sha\":\"...\",\"why\":\"一句话\","
-        "\"risk\":\"一句话\",\"confidence\":0-3}]}。没有值得的就 {\"picks\":[]}。\n\n"
-        % top)
-    # 分批：一次调用喂 triage_batch 个仓库的清单。66 个仓全塞一个 prompt 会顶爆上下文，
-    # 而一个仓库一次调用又要 66 次——按仓分批是两头都省的那一档。
-    batch = int(up.get("triage_batch") or 6)
-    picks = []
-    for i in range(0, len(srcs), batch):
-        group = srcs[i:i + batch]
-        rows = [r for src in group for r in listing_of(src, cands_by_src[src])]
-        say(lines, f"分诊第 {i // batch + 1} 批：{len(group)} 个仓库 / {len(rows)} 条候选")
-        try:
-            got = pick_json(llm(base_url, key, model, head + "\n".join(rows))).get("picks") or []
-        except Exception as e:  # noqa: BLE001 —— LLM 侧任何失败都降级成报告
-            say(lines, f"分诊第 {i // batch + 1} 批失败：{e}")
-            continue
-        picks += filter_picks(got, known, modes)
-    if not picks:
-        say(lines, "分诊结果：无")
-        return []
-    picks.sort(key=lambda x: -x[5])
-    say(lines, "分诊结果：" + " · ".join(f"{p[0].split('/')[-1]}@{p[2]}({p[5]})" for p in picks))
-    return picks
-
-
-def filter_picks(got, known, modes):
-    picks = []
-    for q in got:
-        src, sha = (q.get("repo") or "").strip(), (q.get("sha") or "").strip()
-        if src not in known or sha not in known[src]:  # 模型编造的挡掉
-            continue
-        picks.append((src, modes[src], sha, q.get("why", ""), q.get("risk", ""),
-                      int(q.get("confidence") or 0)))
-    return picks
-
-
-def land(src, mode, sha, why, risk, pol, args, lines):
-    """把一条候选落地成 PR。返回是否开成。"""
-    hits = [f for f in run("git", "show", "--name-only", "--format=", sha).split()
-            for bad in FORBIDDEN if f.startswith(bad)]
-    if hits:
-        say(lines, f"{sha}: 改了禁区文件 {sorted(set(hits))}，跳过。")
-        return 0
-    if args.dry_run:
-        say(lines, f"{sha}: dry-run 命中（{why}），不落地。")
-        return 0
-    branch = pol["branch_prefix"] + sha
-    # 上一条若在 adapt 里失败，index 还停在冲突态，chekcout -B 会报「resolve your index first」
+def land(src, rp, pol, args, lines):
+    idea = open(rp, encoding="utf-8").read()
+    slug = re.sub(r"[^a-z0-9-]+", "-", src.lower().replace("/", "-")).strip("-")
+    branch = f"{pol['branch_prefix']}{slug}-{hashlib.sha1(idea.encode()).hexdigest()[:7]}"
+    # 上一条失败可能留下冲突 index，checkout -B 会报「resolve your index first」
     run("git", "reset", "-q", "--hard", "HEAD", check=False)
     run("git", "clean", "-qfd", check=False)
     run("git", "checkout", "-q", "-B", branch, pol["base"])
-    base_url = os.environ.get("LLM_BASE_URL", "")
-    key = os.environ.get("LLM_API_KEY", "")
-    model = os.environ.get("LLM_MODEL", "")
-    how, ok, mp = "cherry-pick", False, ""
-    if mode == "cherry-pick":
-        code, out = run("git", *BOT, "cherry-pick", "-x", sha, check=False)
-        if code == 0:
-            code, out = run("go", "test", "./...", check=False)
-            ok = code == 0
-            if not ok:
-                run("git", "checkout", "-q", pol["base"])
-                say(lines, f"{sha}: 移植后测试未通过，换下一条。\n```\n" + out[-1200:] + "\n```")
-                return 0
-        else:
-            run("git", "cherry-pick", "--abort", check=False)
+
+    ok, summary = implement(src, idea, lines)
     if not ok:
-        # 兄弟项目不是本仓 fork：代码搬过来只会变成垃圾文件，只能借鉴思路
-        say(lines, f"{sha}: " + ("直搬失败" if mode == "cherry-pick" else "跳过直搬") + "，改试 LLM 适配。")
-        ok, mp = adapt(sha, pol["base"], branch, base_url, key, model, lines, mode, src)
-        if not ok:
-            return 0
-        how = "LLM 适配" if mode != "port" else "LLM 移植（跨语言重写）"
+        run("git", "checkout", "-q", pol["base"])
+        return 0
+    ok, why = finish(src)
+    if not ok:
+        say(lines, f"{src}: 闸门拦下 —— {why}")
+        run("git", "reset", "-q", "--hard", "HEAD")
+        run("git", "clean", "-qfd", check=False)
+        run("git", "checkout", "-q", pol["base"])
+        return 0
+    if args.dry_run:
+        say(lines, f"{src}: dry-run，不推送（本地分支 {branch}）")
+        run("git", "checkout", "-q", pol["base"])
+        return 0
+
+    # main 是生产环境：自动化只许推 autobot/* 分支
+    assert branch.startswith("autobot/"), branch
     run("git", "push", "-q", "-u", "origin", branch)
     run("gh", "label", "create", pol["label"], "--repo", os.environ["GITHUB_REPOSITORY"],
-        "--color", "ededed", "--description", "AutoBot 自动挑选的上游改动", check=False)
-    title = f"autobot: 吸收 {src}@{sha} — {why}"[:120]
-    body = (f"来源 `{src}@{sha}`，实施方式：**{how}**。\n\n"
-            + (mp + "\n\n" if mp else f"- 理由：{why}\n- 风险：{risk}\n")
-            + "- `go build` / `go vet` / `go test ./...` 已通过；合并前请人工确认行为等价。\n")
+        "--color", "ededed", "--description", "AutoBot 分析后提出的借鉴改动", check=False)
+    body = (summary or f"分析报告：`{os.path.basename(rp)}`\n") + \
+        "\n- `go build` / `go vet` / `go test ./...` 已通过；合并前请人工确认行为等价。\n"
     run("gh", "pr", "create", "--repo", os.environ["GITHUB_REPOSITORY"], "--base", pol["base"],
-        "--head", branch, "--title", title, "--body", body, "--label", pol["label"])
-    say(lines, f"已开 PR（{how}）：{branch}")
+        "--head", branch, "--title", f"autobot: 借鉴 {src} 的实现"[:120],
+        "--body", body, "--label", pol["label"])
+    say(lines, f"已开 PR：{branch}")
+    run("git", "checkout", "-q", pol["base"])
     return 1
+
+
+def shard(seq, spec):
+    """--shard i/n：按直线切片（matrix 并行用）。"""
+    if not spec:
+        return seq
+    i, n = (int(x) for x in spec.split("/"))
+    return [x for k, x in enumerate(seq) if k % n == i]
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", help="只看这一个上游（owner/name 或 URL），默认按 AutoBot.yml 全量扫")
-    ap.add_argument("--mode", choices=["cherry-pick", "port"], help="配合 --repo 用")
+    ap.add_argument("--phase", choices=["analyze", "implement", "all"], default="all")
+    ap.add_argument("--shard", default="", help="i/n，只处理该片（matrix 并行用）")
+    ap.add_argument("--repo", help="只处理这一个仓库")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(os.path.join(ROOT, "AutoBot.yml"), encoding="utf-8"))
     up, pol = cfg["upstream"], cfg["policy"]
+    repos = [args.repo] if args.repo else [r["repo"] for r in up["repos"]]
     lines = ["# AutoBot 报告", ""]
 
-    if args.repo:
-        # 手动单仓：全量分诊也走同一条判定，只是范围小、可以更宽容
-        srcs = [(args.repo, args.mode or up.get("repos_mode") or pol["mode"])]
-        land_max, top = 1, 3
-    else:
-        srcs = [(up["repo"], pol["mode"])] + [(r, up.get("repos_mode", pol["mode"]))
-                                             for r in (up.get("repos") or [])]
-        land_max, top = int(up.get("land_max") or 2), int(up.get("triage_top") or 6)
+    if args.phase in ("analyze", "all"):
+        todo = shard(repos, args.shard)
+        say(lines, f"分析 {len(todo)} 个仓库（共 {len(repos)}，分片 {args.shard or '全部'}）")
+        for src in todo:
+            analyze(src, lines)
 
-    # 一轮把全部上游的候选都收上来：活跃仓每天都有新提交，按天轮转会让它们等一周
-    cands_by_src = {}
-    for raw, _mode in srcs:
-        src = raw.replace("https://github.com/", "").replace(".git", "").strip("/")
-        branch, err = fetch_upstream(src)
-        if branch is None:
-            say(lines, f"{src}：拉取失败 {err[:200]}")
-            continue
-        run("git", "checkout", "-q", pol["base"])  # 回来基线：下一条的 cherry 要拿对 HEAD
-        c = candidates_of(branch, up, pol)
-        if not c:
-            say(lines, f"{src}：无未处理提交")
-            continue
-        cands_by_src[src] = c
-        say(lines, f"{src}：候选 {len(c)} 条")
+    if args.phase in ("implement", "all"):
+        reports = []
+        if os.path.isdir(REPORT_DIR):
+            for f in os.listdir(REPORT_DIR):
+                p = os.path.join(REPORT_DIR, f)
+                reports.append((report_score(open(p, encoding="utf-8").read()), p))
+        reports.sort(reverse=True)
+        picked = [(s, p) for s, p in reports if s >= 2][:int(up.get("land_max") or 2)]
+        say(lines, "落地候选：" + (", ".join(f"{os.path.basename(p)}({s})" for s, p in picked) or "无"))
+        for _score, p in picked:
+            land(os.path.basename(p)[:-3].replace("__", "/"), p, pol, args, lines)
 
-    picks = judge(list(cands_by_src), cands_by_src, up, pol, lines, top) if cands_by_src else []
-    opened = 0
-    for src, mode, sha, why, risk, conf in picks:
-        if conf < 2 or opened >= land_max:
-            continue
-        opened += land(src, mode, sha, why, risk, pol, args, lines)
-    if not opened:
-        say(lines, "本轮没有落地（只出报告）。")
     write_report(lines)
     return 0
 

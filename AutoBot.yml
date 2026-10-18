@@ -1,23 +1,12 @@
-# AutoBot.yml —— 上游吸收的声明式配置。
-#
-# 本文件只是契约：谁来读它见 .github/workflows/autobot.yml（schedule + workflow_dispatch）。
-# 改行为只改这里，不用改代码。
+# AutoBot.yml —— 参考仓库清单与策略声明。
+# 谁来读它见 .github/workflows/autobot.yml；改行为只改这里，不用改代码。
 
-version: 1
+version: 2
 
 upstream:
-  repo: linguo2625469/workbuddy2api-panel
-  remote: upstream          # 只在 CI 里临时添加，不写进本地 remote
-  # 顺带扫的兄弟项目。它们不是本仓 fork，多是 Python 实现：代码不能搬，但**行为**可以借鉴。
-  # mode=port 让 LLM 读懂上游逻辑，用 Go 在本仓重写并接进既有调用路径；只新增文件不接线的
-  # （孤儿实现）会被丢弃，落地前还要过 go build / go vet / go test。
-  repos_mode: port
-  # 一轮把全部仓库的候选都收上来做分诊——按天轮转会让活跃仓的更新等一周才被看到。
-  # 分诊按仓分批喂模型（一个仓一次调用 / 全塞一个 prompt 会顶爆上下文，都不可取）。
-  triage_batch: 6
-  triage_top: 6         # 分诊时每批最多挑几条
-  land_max: 2           # 每轮最多真正落地几条（每条会起 agent，5-10 分钟）
+  # 逐个 clone 下来交给 agent 分析的对象。第一个是本仓的上游 fork，其余是参考实现。
   repos:
+    - linguo2625469/workbuddy2api-panel
     - ardeyouxipianyi/workbuddy2api-hub
     - yuechuya/WorkBuddy2API-Gateway
     - HUIdada1/AgentHub
@@ -83,23 +72,18 @@ upstream:
     - a1007479270/aidaka
     - fancylear/dsh-workbuddy-credits
     - Libra1337/Reso2api
-  # 取最近 N 条未处理的提交（每个上游各取 N 条）。刻意按条数而不是按天数：「N 天前」在上游安静的周里
-  # 会恒为空（实测上游最后一条非 merge 提交是 10-11，7 天窗口刚好把它排除），
-  # 白跑一轮还看不出是配置还是故障。已处理过的靠分支名去重，不需要状态文件。
-  limit: 30
+
+  # 分片大小：66 个仓在一个 job 里串行分析跑不完，matrix 按片并行（每片这么多个仓）
+  shard_size: 4
+  # 每轮最多真正落地几条（每条要起 agent 写代码、跑测试、开 PR）
+  land_max: 2
 
 policy:
   base: main
   branch_prefix: autobot/
   label: autobot
-  max_prs_per_run: 2        # 一轮最多开两个 PR：宁可少，不可轰炸
-  # 允许改测试：不允许的话「有没有回归」就无法证明。
-  allow_test_changes: true
-  # LLM 的职责边界：只做「挑哪条」，不写代码。代码由 git cherry-pick 搬，
-  # 由 go test 判定能不能留——让模型凭空生成 Go 补丁的成功率不够，且无法验证。
-  mode: cherry-pick
 
-  # 硬禁项。这是给执行者划的线，不是提示词里的软约束：
+  # 硬禁项：这是给执行者的线，不是提示词里的软约束
   never:
     - push_main
     - merge

@@ -1,7 +1,7 @@
 name: autobot
 
-# 每日挑一条上游改动 → 适配到本仓 → 跑测试 → 提 PR 给人审。
-# 声明与禁项在仓库根的 AutoBot.yml；这里只做执行。
+# 三步：clone 每个参考仓库 → agent 读代码写差异报告 → 汇总选优后写 Go 实现并开 PR。
+# 声明与禁项在仓库根的 AutoBot.yml；这里只做执行与分片。
 # 注意：用 AUTOBOT_TOKEN（PAT）而不是默认 GITHUB_TOKEN——后者触发的 push/PR
 # 不会再触发其它 workflow，PR 上就不会有 binaries 的 test 与四平台构建。
 
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       repo:
-        description: "临时看别的仓库（owner/name），留空则用 AutoBot.yml 里的上游"
+        description: "只分析这一个仓库（owner/name），留空则按 AutoBot.yml 全量"
         required: false
 
 permissions:
@@ -23,22 +23,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  absorb:
+  plan:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+      repos: ${{ steps.shards.outputs.repos }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.AUTOBOT_TOKEN }}
+      - name: 按 AutoBot.yml 生成分片
+        id: shards
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, math, os, yaml
+          cfg = yaml.safe_load(open("AutoBot.yml", encoding="utf-8"))["upstream"]
+          repos = cfg["repos"]
+          size = int(cfg.get("shard_size") or 4)
+          n = math.ceil(len(repos) / size)
+          print("repos=%d" % len(repos))
+          print("matrix=" + json.dumps({"shard": [f"{i}/{n}" for i in range(n)]}))
+          PY
+
+  analyze:
+    needs: plan
+    # 66 个仓一个 job 串行跑不完，按片并行；每片自己 clone、自己分析、自己上传报告
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
-      # 落地环节用 PI 的 agent 循环（自己 grep/读/改/跑测试），不再一次性出补丁。
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-
       - name: 安装 PI 并写入网关配置
         env:
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
@@ -47,7 +69,6 @@ jobs:
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
         run: |
           npm i -g @earendil-works/pi-coding-agent
-          # 用 python 生成，免掉 heredoc 里 baseUrl 带引号的转义问题
           python3 - <<'PY'
           import json, os
           d = os.environ["PI_CODING_AGENT_DIR"]
@@ -62,28 +83,88 @@ jobs:
           open(os.path.join(d, "models.json"), "w").write(json.dumps(cfg))
           PY
           pi --list-models
-
-      # PyYAML 在 ubuntu-latest 上不保证预装，装一次比写个手解析器便宜。
       - run: python3 -m pip install --quiet pyyaml
+      - name: 分析这一片
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
+          PI_SKIP_VERSION_CHECK: "1"
+          SRC: ${{ inputs.repo }}
+        run: |
+          if [ -n "$SRC" ]; then
+            python3 scripts/autobot.py --phase analyze --repo "$SRC"
+          else
+            python3 scripts/autobot.py --phase analyze --shard "${{ matrix.shard }}"
+          fi
+      - name: 报告进 job summary
+        if: always()
+        run: cat autobot-report.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports-${{ strategy.job-index }}
+          path: /tmp/autobot-reports
+          if-no-files-found: ignore
 
-      - name: 挑选、适配与提 PR
+  implement:
+    needs: analyze
+    if: always() && needs.analyze.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.AUTOBOT_TOKEN }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 安装 PI 并写入网关配置
+        env:
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
+        run: |
+          npm i -g @earendil-works/pi-coding-agent
+          python3 - <<'PY'
+          import json, os
+          d = os.environ["PI_CODING_AGENT_DIR"]
+          os.makedirs(d, exist_ok=True)
+          cfg = {"providers": {"ci": {
+              "baseUrl": os.environ["LLM_BASE_URL"].rstrip("/"),
+              "apiKey": os.environ["LLM_API_KEY"],
+              "api": "openai-completions",
+              "models": [{"id": os.environ["LLM_MODEL"], "name": "ci",
+                          "contextWindow": int(os.environ.get("LLM_CONTEXT") or 524288),
+                          "maxTokens": int(os.environ.get("LLM_MAX_TOKENS") or 32768)}]}}}
+          open(os.path.join(d, "models.json"), "w").write(json.dumps(cfg))
+          PY
+          pi --list-models
+      - run: python3 -m pip install --quiet pyyaml
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+          pattern: reports-*
+      - name: 汇总报告
+        run: |
+          mkdir -p /tmp/autobot-reports
+          find /tmp/artifacts -name '*.md' -exec cp {} /tmp/autobot-reports/ \;
+          ls /tmp/autobot-reports | wc -l
+      - name: 落地并开 PR
         env:
           GH_TOKEN: ${{ secrets.AUTOBOT_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
-          SRC: ${{ inputs.repo }}
-          # PI 的 agent home 放 runner.temp：放 workspace 会被 git add -A 一起提交
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
           PI_SKIP_VERSION_CHECK: "1"
-        run: |
-          if [ -n "$SRC" ]; then
-            python3 scripts/autobot.py --repo "$SRC"
-          else
-            python3 scripts/autobot.py
-          fi
-
+        run: python3 scripts/autobot.py --phase implement
       - name: 报告进 job summary
         if: always()
-        run: cat autobot-report.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "无报告" >> "$GITHUB_STEP_SUMMARY"
+        run: cat autobot-report.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
