@@ -97,6 +97,12 @@ jobs:
             -d "{\"model\":\"$LLM_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}")
           echo "HTTP $code"; head -c 400 /tmp/probe.json; echo
           [ "$code" = "200" ] || { echo "网关不可用：$LLM_BASE_URL / $LLM_MODEL"; exit 1; }
+          # PI 走流式；流式挂住时 agent 会静默等到超时，一个字都不打印
+          stream=$(curl -sN -m 60 -X POST "$LLM_BASE_URL/chat/completions" \
+            -H "Authorization: Bearer $LLM_API_KEY" -H 'Content-Type: application/json' \
+            -d "{\"model\":\"$LLM_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":true,\"max_tokens\":4}" | head -c 300)
+          echo "流式: $stream"
+          case "$stream" in *data:*) ;; *) echo "流式无输出，agent 会一直挂着"; exit 1;; esac
 
       - name: 分析这一片
         # 指定单仓时只有第 0 片干活，其余跳过（job 级 if 引用不了 matrix，只能放这里）
