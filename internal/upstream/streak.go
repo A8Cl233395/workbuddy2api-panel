@@ -34,17 +34,11 @@ func clientToken() string {
 
 // StreakFull 连登完整状态（GET /activity/growth/streak）。
 type StreakFull struct {
-	// LaunchDate 活动上线日（服务端给出）：补登窗口的下界之一，见 MakeupCandidates。
-	LaunchDate string `json:"launch_date"`
-	Streak     struct {
+	Streak struct {
 		Days              int    `json:"days"`
 		MonthTotalDays    int    `json:"month_total_days"`
 		NextTier          string `json:"next_tier"`
 		NextTierRemaining int    `json:"next_tier_remaining"`
-		// MakeupDates 是**已补登记录**（官方成长中心命中即显示「已补签」），
-		// 不是待补清单。保留 RawMessage 是为了区分「缺字段」（可当空）与
-		// 「存在但形状不对」（必须报错，不能猜成空表）。
-		MakeupDates json.RawMessage `json:"makeup_dates"`
 	} `json:"streak"`
 	MakeupCards struct {
 		Balance int `json:"balance"`
