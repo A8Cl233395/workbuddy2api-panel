@@ -260,3 +260,19 @@ func toolCallNameMissing(tc map[string]any) bool {
 	}
 	return strings.TrimSpace(name) == ""
 }
+
+// toolCallNameEmpty 判断 assistant.tool_calls[] 单项的 function.name 是否为空。
+// 仅当 function 对象存在、name 字段存在且为空白字符串时判真；
+// function / name 字段缺失时判假——历史报文里存在不带 function 的占位条目，
+// 上游不会因此拒参，这里不扩大打击面。
+func toolCallNameEmpty(tc map[string]any) bool {
+	fn, ok := tc["function"].(map[string]any)
+	if !ok {
+		return false
+	}
+	name, ok := fn["name"].(string)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(name) == ""
+}
