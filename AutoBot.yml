@@ -8,9 +8,10 @@ version: 1
 upstream:
   repo: linguo2625469/workbuddy2api-panel
   remote: upstream          # 只在 CI 里临时添加，不写进本地 remote
-  # 顺带扫的兄弟项目。它们不是本仓 fork，语言/结构都不同，源码搬进来只会变成垃圾文件，
-  # 所以统一走 mode=adapt：只让 LLM 产出「改本仓既有文件」的补丁，产不出就跳过、不开 PR。
-  repos_mode: adapt
+  # 顺带扫的兄弟项目。它们不是本仓 fork，多是 Python 实现：代码不能搬，但**行为**可以借鉴。
+  # mode=port 让 LLM 读懂上游逻辑，用 Go 在本仓重写并接进既有调用路径；只新增文件不接线的
+  # （孤儿实现）会被丢弃，落地前还要过 go build / go vet / go test。
+  repos_mode: port
   repos:
     - ardeyouxipianyi/workbuddy2api-hub
     - ithtelab/workbuddy-manager

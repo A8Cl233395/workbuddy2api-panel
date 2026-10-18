@@ -81,19 +81,72 @@ def verdict_of(out):
     try:
         d = pick_json(out)
     except Exception:  # noqa: BLE001
-        return "skip", "回复不是 JSON：" + out[:120].replace("\n", " "), ""
+        return "skip", "回复不是 JSON：" + out[:120].replace("\n", " "), "", ""
     v = str(d.get("verdict") or "skip").strip().lower()
     why = str(d.get("why") or "").strip()
     body = strip_fence(str(d.get("patch") or "")).strip()
-    return v, why or "（模型未给原因）", (body + "\n") if body else ""
+    mp = str(d.get("mapping") or "").strip()
+    return v, why or "（模型未给原因）", (body + "\n") if body else "", mp
 
 
-def adapt(sha, base, branch, base_url, key, model, lines):
-    """让模型把上游提交改写成本仓能用的补丁，提交到 branch。返回是否成功。"""
+def tracked_files():
+    return set(run("git", "ls-tree", "-r", "--name-only", "HEAD").splitlines())
+
+
+def port_excerpts(sha, limit=3):
+    """跨语言移植的上下文：拿上游的标识符去本仓 Go 源码里找同类模块。
+
+    只按「有没有命中」取文件会全是 cmd/* 这种大杂烩（通用词处处命中），
+    所以按「命中的不同标识符数 / 文件大小的平方根」排序——同领域的模块才会赢。
+    """
+    diff = run("git", "show", "--format=", sha)
+    toks = {t for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{4,}", diff)
+            if t.lower() not in {"import", "return", "class", "self", "none", "true", "false",
+                                 "async", "await", "python", "raise", "except", "print", "value",
+                                 "string", "request", "response", "error", "message", "content"}}
+    toks = sorted(toks)[:40]
+    args = ["git", "grep", "-c", "-w", "-i"]
+    for t in toks:
+        args += ["-e", t]
+    args += ["--", "*.go"]
+    code, out = run(*args, check=False)
+    cand = []
+    for line in out.splitlines():
+        f, _, n = line.rpartition(":")
+        if f and f.endswith(".go") and "_test.go" not in f:
+            cand.append(f)
+    scored = []
+    for f in cand[:80]:
+        fp = os.path.join(ROOT, f)
+        if not os.path.isfile(fp):
+            continue
+        src = open(fp, encoding="utf-8", errors="replace").read()
+        low = src.lower()
+        hit = sum(1 for t in toks if t.lower() in low)
+        if hit:
+            scored.append((hit / (len(src) ** 0.5 + 1), f, hit, low))
+    scored.sort(reverse=True)
+    ex = []
+    for _, f, hit, low in scored[:limit]:
+        lines = low.splitlines()
+        hit_line = next((i for i, l in enumerate(lines)
+                         if any(t.lower() in l for t in toks)), 0)
+        lo, hi = max(0, hit_line - 30), min(len(lines), hit_line + 60)
+        ex.append(f"--- 本仓同类模块 {f}（命中 {hit} 个上游标识符；第 {lo + 1}-{hi} 行）---\n"
+                  + "\n".join(lines[lo:hi]))
+    ex.append("--- 本仓 Go 文件树（前 300 个）---\n"
+              + "\n".join(sorted(f for f in tracked_files() if f.endswith(".go"))[:300])[:6000])
+    return ex
+
+
+def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt"):
+    """让模型把上游提交改写成本仓能用的补丁，提交到 branch。返回 (是否成功, 行为映射)。"""
     run("git", "checkout", "-q", "-B", branch, base)
     diff = run("git", "show", "--format=", sha)
     files = run("git", "show", "--name-only", "--format=", sha).split()
     excerpts = []
+    if mode == "port":
+        excerpts = port_excerpts(sha)
     for f in files[:3]:
         fp = os.path.join(ROOT, f)
         if os.path.isfile(fp):
@@ -101,8 +154,24 @@ def adapt(sha, base, branch, base_url, key, model, lines):
         else:
             excerpts.append(f"--- {f} 在本仓不存在（新文件，或本仓实现在别处） ---")
 
+    # port：上游是另一种语言（通常 Python），本仓是 Go。任务不是搬代码，是读逻辑→Go 重写→接线。
+    port_head = (
+        f"上游 {sha} 是另一种语言的实现，本仓是 Go。**不要因为「本仓没有 xxx.py」就跳过**——"
+        "那正是本任务的前提。你要做的是：读懂这个提交修正/新增了什么行为，然后在本仓用 Go 实现同样的行为，"
+        "并接进真实调用路径。\n"
+        "硬性要求：\n"
+        "1. 必须修改至少一个本仓既有 .go 文件，把新逻辑接进去；只新增文件、没有任何既有文件被改，视为孤儿实现，会被丢弃。\n"
+        "2. 风格跟随邻近代码（错误处理、日志、命名、单测），不要引入新依赖。\n"
+        "3. mapping 写清「上游函数/文件 → 本仓文件:函数」，供人审。\n\n"
+        "输出**一个 JSON 对象**，不要别的话：\n"
+        '{"verdict": "port|already_have|skip",\n'
+        ' "why": "一到两句：上游改的是什么行为、本仓现状",\n'
+        ' "mapping": "signin.py:run_growth → internal/scheduler/growth.go:RunGrowth",\n'
+        ' "patch": "unified diff（含 diff --git/---/+++/@@；新文件用 new file mode 100644）"}\n'
+        "already_have 要给本仓文件:函数作为依据；skip 只在依赖本仓根本没有的抽象（如前端、外部服务）时才用。\n\n")
+
     def build(diff_cap, ex_cap):
-        return ("下面是一个上游提交的 diff。本仓是它的长期 fork，同一功能往往已有**另一种实现**，"
+        return (port_head if mode == "port" else "") + ("下面是一个上游提交的 diff。本仓是它的长期 fork，同一功能往往已有**另一种实现**，"
                 "所以原样移植必然冲突——这正是要你做的事：判断本仓现状，再只补缺的那部分。\n\n"
                 "输出**一个 JSON 对象**，不要别的话：\n"
                 "{\"verdict\": \"adapt|partial|already_have|skip\",\n"
@@ -130,11 +199,11 @@ def adapt(sha, base, branch, base_url, key, model, lines):
         except Exception as e:  # noqa: BLE001
             say(lines, f"  {sha}: 第 {i + 1} 次适配调用失败：{e}")
     if out is None:
-        return False
-    verdict, why, body = verdict_of(out)
+        return False, ""
+    verdict, why, body, mp = verdict_of(out)
     say(lines, f"  {sha}: 判定={verdict} — {why}")
     if verdict in ("skip", "already_have") or not body.strip():
-        return False
+        return False, ""
     with open(PATCH, "w", encoding="utf-8") as f:
         f.write(body)
     code, msg = run("git", "apply", "--3way", PATCH, check=False)
@@ -144,7 +213,7 @@ def adapt(sha, base, branch, base_url, key, model, lines):
         code, msg = run("git", "apply", "--recount", "-C1", PATCH, check=False)
         if code != 0:
             say(lines, f"  {sha}: 补丁应用失败：\n```\n" + msg[:600] + "\n```")
-            return False
+            return False, ""
     # 兄弟项目的补丁可能整份搬 Python 进来：go test 照样全绿，但那只是垃圾文件
     # 用 status 而不是 diff：git apply --3way 会把改动写进 index，diff 看不见；
     # status 同时覆盖已暂存与未跟踪。已是本仓既有文件的（比如面板 js/html）放行，
@@ -156,16 +225,34 @@ def adapt(sha, base, branch, base_url, key, model, lines):
         run("git", "reset", "-q", "--hard", "HEAD")
         run("git", "clean", "-qfd")
         say(lines, f"  {sha}: 补丁引入非 Go 文件 {alien[:5]}，丢弃。")
-        return False
+        return False, ""
+    if mode == "port":
+        # 只新增、没接线 = 孤儿实现：能编译能过测试，但没有任何行为改变
+        changed = [l[3:] for l in run("git", "status", "--porcelain", "-uall").splitlines()]
+        new_only = [f for f in changed if f not in tracked_files()]
+        if new_only and len(new_only) == len(changed):
+            run("git", "reset", "-q", "--hard", "HEAD")
+            run("git", "clean", "-qfd")
+            say(lines, f"  {sha}: 只新增 {new_only}、没有接线到既有文件，丢弃。")
+            return False, ""
+    # 跨语言重写先过编译与 vet（后面的 go test 是两条路径共用的闸）
+    for cmd in (["go", "build", "./..."], ["go", "vet", "./..."]):
+        if mode == "port":
+            code, msg = run(*cmd, check=False)
+            if code != 0:
+                run("git", "reset", "-q", "--hard", "HEAD")
+                run("git", "clean", "-qfd")
+                say(lines, f"  {sha}: {' '.join(cmd[1:])} 未通过：\n```\n" + msg[-1200:] + "\n```")
+                return False, ""
     code, msg = run("go", "test", "./...", check=False)
     if code != 0:
         run("git", "reset", "-q", "--hard", "HEAD")
         run("git", "clean", "-qfd")
         say(lines, f"  {sha}: 适配后测试未通过：\n```\n" + msg[-1200:] + "\n```")
-        return False
+        return False, ""
     run("git", "add", "-A")
     run("git", "commit", "-q", "-m", f"autobot: 适配上游 {sha}（LLM 改写，非原样移植）")
-    return True
+    return True, mp
 
 
 def main():
@@ -282,7 +369,7 @@ def absorb(src, mode, up, pol, args, lines):
             return 0
         branch = pol["branch_prefix"] + sha
         run("git", "checkout", "-q", "-B", branch, pol["base"])
-        how, ok = "cherry-pick", False
+        how, ok, mp = "cherry-pick", False, ""
         if mode == "cherry-pick":
             code, out = run("git", "cherry-pick", "-x", sha, check=False)
             if code == 0:
@@ -297,16 +384,18 @@ def absorb(src, mode, up, pol, args, lines):
         if not ok:
             # 兄弟项目不是本仓 fork：代码搬过来只会变成垃圾文件，只能借鉴思路
             say(lines, f"{sha}: " + ("直搬失败" if mode == "cherry-pick" else "跳过直搬") + "，改试 LLM 适配。")
-            if not adapt(sha, pol["base"], branch, base_url, key, model, lines):
+            ok, mp = adapt(sha, pol["base"], branch, base_url, key, model, lines, mode)
+            if not ok:
                 continue
-            how = "LLM 适配"
+            how = "LLM 适配" if mode != "port" else "LLM 移植（跨语言重写）"
         run("git", "push", "-q", "-u", "origin", branch)
         run("gh", "label", "create", pol["label"], "--repo", os.environ["GITHUB_REPOSITORY"],
             "--color", "ededed", "--description", "AutoBot 自动挑选的上游改动", check=False)
         title = f"autobot: 吸收 {src}@{sha} — {pick.get('why', '')}"[:120]
         body = (f"来源 `{src}@{sha}`，实施方式：**{how}**。\n\n"
                 f"- 理由：{pick.get('why', '')}\n- 风险：{pick.get('risk', '')}\n"
-                f"- `go test ./...` 已通过；合并前请人工确认实现口径。\n")
+                + (f"- 行为映射：{mp}\n" if mp else "")
+                + "- `go build` / `go vet` / `go test ./...` 已通过；合并前请人工确认行为等价。\n")
         run("gh", "pr", "create", "--repo", os.environ["GITHUB_REPOSITORY"], "--base", pol["base"],
             "--head", branch, "--title", title, "--body", body, "--label", pol["label"])
         say(lines, f"已开 PR（{how}）：{branch}")
