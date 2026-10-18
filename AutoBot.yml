@@ -8,7 +8,10 @@ version: 1
 upstream:
   repo: linguo2625469/workbuddy2api-panel
   remote: upstream          # 只在 CI 里临时添加，不写进本地 remote
-  lookback_days: 7          # 只看最近 N 天的提交；不做状态文件，靠分支名去重
+  # 取最近 N 条未处理的提交。刻意按条数而不是按天数：「N 天前」在上游安静的周里
+  # 会恒为空（实测上游最后一条非 merge 提交是 10-11，7 天窗口刚好把它排除），
+  # 白跑一轮还看不出是配置还是故障。已处理过的靠分支名去重，不需要状态文件。
+  limit: 30
 
 policy:
   base: main
