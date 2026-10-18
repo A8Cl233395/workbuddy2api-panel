@@ -3,6 +3,7 @@ package scheduler
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,9 +27,14 @@ type makeupCell struct {
 type makeupStub struct {
 	today      string // heatmap 的 today.date，缺省 2026-10-11
 	cells      []makeupCell
-	balance    int  // makeup_cards.balance
-	useErr     bool // use 返回业务错误（上游拒绝）
-	heatmapErr bool // heatmap 500
+	balance    int      // makeup_cards.balance
+	launch     string   // streak.launch_date，缺省 2026-06-17
+	noLaunch   bool     // 响应里不带 launch_date
+	madeUp     []string // streak.makeup_dates：已补签历史（不是待办清单）
+	useMsg     string   // use 业务错误文案，缺省 "date is not broken"
+	useErr     bool     // use 返回业务错误（上游拒绝）
+	heatmapErr bool     // heatmap 500
+	heatmapRaw string   // 非空时 heatmap 直接返回该原始载荷（结构异常用例）
 
 	heatmapHits atomic.Int32
 	streakHits  atomic.Int32
@@ -55,6 +61,10 @@ func (s *makeupStub) handler() http.Handler {
 				w.Write([]byte(`boom`))
 				return
 			}
+			if s.heatmapRaw != "" {
+				w.Write([]byte(s.heatmapRaw))
+				return
+			}
 			today := s.today
 			if today == "" {
 				today = "2026-10-11"
@@ -71,7 +81,21 @@ func (s *makeupStub) handler() http.Handler {
 			w.Write([]byte(b.String()))
 		case "/activity/growth/streak":
 			s.streakHits.Add(1)
-			fmt.Fprintf(w, `{"code":0,"data":{"makeup_cards":{"balance":%d,"max":4}}}`, s.balance)
+			launch := s.launch
+			if launch == "" {
+				launch = "2026-06-17"
+			}
+			launchField := fmt.Sprintf(`"launch_date":"%s",`, launch)
+			if s.noLaunch {
+				launchField = ""
+			}
+			madeUp := `[]`
+			if s.madeUp != nil {
+				raw, _ := json.Marshal(s.madeUp)
+				madeUp = string(raw)
+			}
+			fmt.Fprintf(w, `{"code":0,"data":{%s"streak":{"days":3,"makeup_dates":%s},`+
+				`"makeup_cards":{"balance":%d,"max":4}}}`, launchField, madeUp, s.balance)
 		case "/activity/growth/makeup-cards/use":
 			var body struct {
 				Target string `json:"target_date"`
@@ -81,8 +105,12 @@ func (s *makeupStub) handler() http.Handler {
 			s.used = append(s.used, body.Target)
 			s.mu.Unlock()
 			if s.useErr {
+				msg := s.useMsg
+				if msg == "" {
+					msg = "date is not broken"
+				}
 				w.WriteHeader(400)
-				w.Write([]byte(`{"code":400,"msg":"date is not broken"}`))
+				fmt.Fprintf(w, `{"code":400,"msg":%q}`, msg)
 				return
 			}
 			w.Write([]byte(`{"code":0,"data":{}}`))
@@ -90,6 +118,18 @@ func (s *makeupStub) handler() http.Handler {
 			http.Error(w, "not found", 404)
 		}
 	})
+}
+
+// makeupForTest 走真实调用路径：先查连登，再判断/执行补签（补签成功时内部会重查连登）。
+func makeupForTest(t *testing.T, s *Scheduler, a *auth.Auth) {
+	t.Helper()
+	full, err := s.cfg.Upstream.GrowthStreakFull(a)
+	if err != nil {
+		t.Fatalf("GrowthStreakFull: %v", err)
+	}
+	if _, err := s.makeupMissed(a, full); err != nil {
+		t.Errorf("makeupMissed: %v", err)
+	}
 }
 
 // makeupScheduler 构造只含一个账号的调度器，指向 stub。
@@ -121,7 +161,7 @@ func TestMakeupMissedFillsNearestFirst(t *testing.T) {
 	stub := &makeupStub{cells: makeupCells(), balance: 2}
 	s, a := makeupScheduler(t, stub)
 
-	s.makeupMissed(a)
+	makeupForTest(t, s, a)
 
 	got := stub.usedDates()
 	want := []string{"2026-10-07", "2026-10-06"}
@@ -146,7 +186,7 @@ func TestMakeupMissedNoBrokenNoWrite(t *testing.T) {
 	stub := &makeupStub{cells: cells, balance: 2}
 	s, a := makeupScheduler(t, stub)
 
-	s.makeupMissed(a)
+	makeupForTest(t, s, a)
 
 	if got := stub.usedDates(); len(got) != 0 {
 		t.Errorf("补签提交=%v want 空（无漏签）", got)
@@ -158,7 +198,7 @@ func TestMakeupMissedNoCardNoWrite(t *testing.T) {
 	stub := &makeupStub{cells: makeupCells(), balance: 0}
 	s, a := makeupScheduler(t, stub)
 
-	s.makeupMissed(a)
+	makeupForTest(t, s, a)
 
 	if got := stub.usedDates(); len(got) != 0 {
 		t.Errorf("补签提交=%v want 空（无卡）", got)
@@ -171,7 +211,7 @@ func TestMakeupMissedStopsOnReject(t *testing.T) {
 	stub := &makeupStub{cells: makeupCells(), balance: 3, useErr: true}
 	s, a := makeupScheduler(t, stub)
 
-	s.makeupMissed(a)
+	makeupForTest(t, s, a)
 
 	got := stub.usedDates()
 	if len(got) != 1 || got[0] != "2026-10-07" {
@@ -184,7 +224,7 @@ func TestMakeupMissedHeatmapErrorSilent(t *testing.T) {
 	stub := &makeupStub{cells: makeupCells(), balance: 2, heatmapErr: true}
 	s, a := makeupScheduler(t, stub)
 
-	s.makeupMissed(a) // 不应 panic
+	makeupForTest(t, s, a) // 不应 panic
 
 	if got := stub.usedDates(); len(got) != 0 {
 		t.Errorf("补签提交=%v want 空（查询失败不猜）", got)
@@ -196,12 +236,153 @@ func TestMakeupMissedRepeatedRunStopsAfterCardsUsed(t *testing.T) {
 	stub := &makeupStub{cells: makeupCells(), balance: 1}
 	s, a := makeupScheduler(t, stub)
 
-	s.makeupMissed(a)
+	makeupForTest(t, s, a)
 	stub.balance = 0 // 上游已扣卡
-	s.makeupMissed(a)
+	makeupForTest(t, s, a)
 
 	got := stub.usedDates()
 	if len(got) != 1 || got[0] != "2026-10-07" {
 		t.Errorf("两轮补签提交=%v want [2026-10-07]（第二轮无卡不发写）", got)
+	}
+}
+
+// captureSchedLog 捕获 log 输出（log.SetOutput 是进程级全局，本组测试不并行）。
+func captureSchedLog(t *testing.T) *syncBuffer {
+	t.Helper()
+	buf := &syncBuffer{}
+	old := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(old) })
+	return buf
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestMakeupMissedSkipsAlreadyMadeUpDates 回归（上游 245f3138）：streak.makeup_dates
+// 是**已补登历史**，不是待办清单。旧实现把它当待补日期，会每轮重复提交已补过的日子；
+// 真正待补的日期只能来自活跃日历的 score == 0。
+func TestMakeupMissedSkipsAlreadyMadeUpDates(t *testing.T) {
+	stub := &makeupStub{cells: makeupCells(), balance: 2, madeUp: []string{"2026-10-07"}}
+	s, a := makeupScheduler(t, stub)
+
+	makeupForTest(t, s, a)
+
+	got := stub.usedDates()
+	want := []string{"2026-10-06", "2026-10-05"}
+	if len(got) != len(want) {
+		t.Fatalf("补签提交=%v want %v（已补登日期必须排除）", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("补签提交=%v want %v（跳过已补登、最近的优先）", got, want)
+		}
+	}
+}
+
+// TestMakeupMissedHistoryOnlyNeverResubmits 只有补签历史、没有新断登：一个写请求都不发，
+// 连跑两轮也不会把历史日期再提交一次（旧实现在这里每轮都会补 10-07）。
+func TestMakeupMissedHistoryOnlyNeverResubmits(t *testing.T) {
+	cells := makeupCells()
+	history := []string{"2026-10-05", "2026-10-06", "2026-10-07"}
+	for i := range cells {
+		if cells[i].score == 0 {
+			cells[i].score = 2
+		}
+	}
+	stub := &makeupStub{cells: cells, balance: 2, madeUp: history}
+	s, a := makeupScheduler(t, stub)
+
+	for i := 0; i < 2; i++ {
+		makeupForTest(t, s, a)
+	}
+
+	if got := stub.usedDates(); len(got) != 0 {
+		t.Errorf("补签提交=%v want 空（历史不是待办）", got)
+	}
+}
+
+// TestMakeupMissedMissingLaunchDateStopsAndWarns 上线日期缺失：不能猜补登窗口，
+// 本轮不补，且必须留 WARN（失败提醒不能被其他步骤的成功盖掉）。
+func TestMakeupMissedMissingLaunchDateStopsAndWarns(t *testing.T) {
+	buf := captureSchedLog(t)
+	stub := &makeupStub{cells: makeupCells(), balance: 2, noLaunch: true}
+	s, a := makeupScheduler(t, stub)
+
+	makeupForTest(t, s, a)
+
+	if got := stub.usedDates(); len(got) != 0 {
+		t.Errorf("补签提交=%v want 空（窗口不可判定不花卡）", got)
+	}
+	if !strings.Contains(buf.String(), "WARN") {
+		t.Errorf("日志=%q want 含 WARN（缺 launch_date 必须提醒）", buf.String())
+	}
+}
+
+// TestMakeupMissedInvalidCalendarStopsAndWarns 日历结构异常（分数是字符串"0"）：
+// 不能当成「0 分断登」，本轮停手并提醒。
+func TestMakeupMissedInvalidCalendarStopsAndWarns(t *testing.T) {
+	buf := captureSchedLog(t)
+	stub := &makeupStub{
+		balance:    2,
+		heatmapRaw: `{"code":0,"data":{"today":{"date":"2026-10-11"},"cells":[{"date":"2026-10-07","score":"0"}]}}`,
+	}
+	s, a := makeupScheduler(t, stub)
+
+	makeupForTest(t, s, a)
+
+	if got := stub.usedDates(); len(got) != 0 {
+		t.Errorf("补签提交=%v want 空（异常日历不花卡）", got)
+	}
+	if !strings.Contains(buf.String(), "WARN") {
+		t.Errorf("日志=%q want 含 WARN（日历异常必须提醒）", buf.String())
+	}
+}
+
+// TestMakeupMissedBenignRaceDoesNotWarn 查询后日期已被补上（400 + 明确文案）：
+// 属正常竞争，不记失败、不打 WARN，且不继续往前补。
+func TestMakeupMissedBenignRaceDoesNotWarn(t *testing.T) {
+	buf := captureSchedLog(t)
+	stub := &makeupStub{cells: makeupCells(), balance: 3, useErr: true,
+		useMsg: "date is not broken, no makeup needed"}
+	s, a := makeupScheduler(t, stub)
+
+	makeupForTest(t, s, a)
+
+	if got := stub.usedDates(); len(got) != 1 || got[0] != "2026-10-07" {
+		t.Errorf("补签提交=%v want [2026-10-07]（竞争即停）", got)
+	}
+	if strings.Contains(buf.String(), "WARN") {
+		t.Errorf("日志=%q want 无 WARN（良性竞争不算失败）", buf.String())
+	}
+}
+
+// TestMakeupMissedUnknownRejectWarns 上游未知拒绝：必须留 WARN。
+func TestMakeupMissedUnknownRejectWarns(t *testing.T) {
+	buf := captureSchedLog(t)
+	stub := &makeupStub{cells: makeupCells(), balance: 3, useErr: true, useMsg: "invalid request"}
+	s, a := makeupScheduler(t, stub)
+
+	makeupForTest(t, s, a)
+
+	if got := stub.usedDates(); len(got) != 1 {
+		t.Errorf("补签提交=%v want 1 次（拒绝即停）", got)
+	}
+	if !strings.Contains(buf.String(), "WARN") {
+		t.Errorf("日志=%q want 含 WARN（未知拒绝必须提醒）", buf.String())
 	}
 }

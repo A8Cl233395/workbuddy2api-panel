@@ -212,6 +212,7 @@ def pi_port(sha, lines, model):
         "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
         "最后一行输出：改了哪些文件 + 上游行为对应本仓的哪个 文件:函数。"
     )
+    # PI_MODELS 可逗号轮换；不设就用 LLM_MODEL 一个（重试仍会重跑同一模型）
     models = [m.strip() for m in (os.environ.get("PI_MODELS") or model).split(",") if m.strip()] or [model]
     global _pi_deadline
     if _pi_deadline is None:
@@ -228,9 +229,9 @@ def pi_port(sha, lines, model):
             # 极简提示词把整包压到约 3.3KB（实测）。
             argv = ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci", "--model", m,
                     "--no-session", "--approve", "--no-context-files", "--no-skills"]
-            # 原生 tool calling 的端点用 PI 自带系统提示词；只有 duck 那种文本协议模拟
-            # 才需要极简提示词把整包压到 19k 字符以下。
-            if not os.environ.get("PI_NATIVE"):
+            # 默认用 PI 自带的系统提示词（原生 tool calling 的端点工具纪律更好）；
+            # PI_TERSE=1 才换极简版——那是给 19k 输入上限的 duck 用的。
+            if os.environ.get("PI_TERSE"):
                 argv += ["--system-prompt", PI_SYSPROMPT]
             code, out = run(*argv, task, check=False, timeout=900)
         except subprocess.TimeoutExpired:
