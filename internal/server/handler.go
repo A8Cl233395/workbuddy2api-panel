@@ -1727,9 +1727,6 @@ func writeOpenAIQuotaError(w http.ResponseWriter, msg, hint string) {
 	writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": e})
 }
 
-// hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态
-// messages[].content[] {type:"image_url"}）。畸形/其他形态一律 false（hint 侧
-// 宁缺勿滥：判不出带图就不给「模型不支持图片」指向）。
 // toolNamesIfPresent 是 ToolNameAllowlist 的廉价前置闸门：body 里没有 "tool
 // 或 "function 这类键前缀时不可能出现工具名，直接返回 nil（与解析结果为空的
 // 语义一致）。文本里偶然出现这些词只会多解析一次，不改变结果。
@@ -1747,6 +1744,9 @@ func imagePartIfPresent(body []byte) bool {
 	return bytes.Contains(body, []byte(`"image_url"`)) && hasImagePart(body)
 }
 
+// hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态
+// messages[].content[] {type:"image_url"}）。畸形/其他形态一律 false（hint 侧
+// 宁缺勿滥：判不出带图就不给「模型不支持图片」指向）。
 func hasImagePart(body []byte) bool {
 	var peek struct {
 		Messages []struct {
