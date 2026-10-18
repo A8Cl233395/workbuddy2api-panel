@@ -104,6 +104,20 @@ jobs:
           echo "流式: $stream"
           case "$stream" in *data:*) ;; *) echo "流式无输出，agent 会一直挂着"; exit 1;; esac
 
+      - name: PI 自检
+        # agent 静默 25 分钟时无法区分「网关慢」和「PI 根本跑不起来」，先花 4 分钟问清楚
+        timeout-minutes: 5
+        env:
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
+          PI_SKIP_VERSION_CHECK: "1"
+        run: |
+          rm -f /tmp/pi-selftest.txt
+          timeout 240 pi -p --provider ci --model "$LLM_MODEL" --no-session --approve \
+            "用 write 工具把 exactly-ok 写进 /tmp/pi-selftest.txt，然后结束。不要做别的。" || echo "PI 退出码 $?"
+          echo "--- 产物:"; cat /tmp/pi-selftest.txt 2>/dev/null || echo "(没有产物)"
+          test -f /tmp/pi-selftest.txt
+
       - name: 分析这一片
         # 指定单仓时只有第 0 片干活，其余跳过（job 级 if 引用不了 matrix，只能放这里）
         if: inputs.repo == '' || startsWith(matrix.shard, '0/')
