@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -228,5 +229,66 @@ func TestPrepareBodyOptNoCacheKeyInjection(t *testing.T) {
 	}
 	if _, present := obj["prompt_cache_key"]; present {
 		t.Fatalf("PrepareBodyOpt must NOT inject prompt_cache_key, but got: %v", obj["prompt_cache_key"])
+	}
+}
+
+func TestPromptCacheKeyPrecedence(t *testing.T) {
+	const uid = "user-abc-123"
+	uidKey := func(conv string) string { return buildCacheKey(uid, conv) }
+
+	cases := []struct {
+		name string
+		obj  map[string]any
+		conv string
+		want string // 空串表示不应注入（ok=false）
+	}{
+		{"existing client key", map[string]any{"prompt_cache_key": "client-key"}, "arg-conv", ""},
+		{"empty client key", map[string]any{"prompt_cache_key": ""}, "arg-conv", uidKey("arg-conv")},
+		{"non-string client key", map[string]any{"prompt_cache_key": 123}, "arg-conv", uidKey("arg-conv")},
+		{"snake conversation", map[string]any{"conversation_id": "conv-42"}, "arg-conv", uidKey("conv-42")},
+		{"camel conversation", map[string]any{"conversationId": "conv-43"}, "arg-conv", uidKey("conv-43")},
+		{"snake wins over camel", map[string]any{"conversation_id": "snake", "conversationId": "camel"}, "arg-conv", uidKey("snake")},
+		{"fallback to arg", map[string]any{}, "arg-conv", uidKey("arg-conv")},
+		{"all empty", map[string]any{}, "", uidKey("")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := promptCacheKeyFor(c.obj, uid, c.conv)
+			if c.want == "" {
+				if ok {
+					t.Fatalf("ok=true key=%q, want no injection", got)
+				}
+				return
+			}
+			if !ok || got != c.want {
+				t.Fatalf("got=(%q,%v), want (%q,true)", got, ok, c.want)
+			}
+		})
+	}
+}
+
+// TestPrepareBodyCacheKeyEquivalence 钉住「同一次解析注入」与旧「两遍
+// PrepareBodyOpt + InjectPromptCacheKey」的最终字节完全一致。
+func TestPrepareBodyCacheKeyEquivalence(t *testing.T) {
+	const uid = "user-abc-123"
+	const conv = "conv-arg"
+	bodies := []string{
+		`{"model":"glm-5.2","messages":[]}`,
+		`{"model":"glm-5.2","messages":[],"prompt_cache_key":"client-key"}`,
+		`{"model":"glm-5.2","messages":[],"conversation_id":"conv-42"}`,
+		`{"model":"glm-5.2","messages":[],"conversationId":"conv-43"}`,
+		`{"model":"glm-5.2","messages":[],"conversation_id":"snake","conversationId":"camel"}`,
+		`{"model":"glm-5.2","messages":[],"prompt_cache_key":123}`,
+		`not json`,
+		``,
+	}
+	for _, in := range bodies {
+		t.Run(in, func(t *testing.T) {
+			oldBody := InjectPromptCacheKey(PrepareBodyOpt([]byte(in), false), uid, conv)
+			newBody, _ := prepareBodyOpt([]byte(in), false, nil, nil, nil, uid, conv, true)
+			if !bytes.Equal(oldBody, newBody) {
+				t.Fatalf("body mismatch\nold=%s\nnew=%s", oldBody, newBody)
+			}
+		})
 	}
 }

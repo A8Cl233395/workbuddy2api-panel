@@ -32,11 +32,46 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	return body
 }
 
+// SplitRealmPrefix 解析网关的 realm 前缀协议（"[realm:]model"）：
+// 取第一个 ":"，前段恰为 "cn"/"global" 才剥离；否则视为裸名，realm 回落 "cn"。
+// 大小写敏感（前缀必须是精确的小写枚举）。server.resolveModel 委托本函数，
+// 保证选号、粘性、出站重写三处口径一致。
+func SplitRealmPrefix(model string) (realm, bare string) {
+	if i := strings.IndexByte(model, ':'); i >= 0 {
+		switch model[:i] {
+		case "cn", "global":
+			return model[:i], model[i+1:]
+		}
+	}
+	return "cn", model
+}
+
+// normalizeModelName 把出站 model 剥成裸名：上游只认裸名，realm 前缀是网关侧
+// 路由协议。model 缺失或非字符串时保持原样（不二次错误化坏 body）。
+func normalizeModelName(obj map[string]any) {
+	cur, ok := obj["model"].(string)
+	if !ok {
+		return
+	}
+	if _, bare := SplitRealmPrefix(cur); bare != cur {
+		obj["model"] = bare
+	}
+}
+
 // PrepareBodyOptWithEffortsDefaultAndCaps 在 …AndDefault 之上接入模型输出上限快照：
 // 无显式限额的请求按目录动态值补 max_tokens（见 injectCatalogMaxTokens）。
 // maxOut 为 nil 时行为与 …AndDefault 完全一致。
 // 返回改写后的请求体与本次**实际生效**的思考档位（未携带该字段/未知模型/未知档位 → ""）。
+//
+// 导出入口不注入 prompt_cache_key（保持既有公开语义）；生产路径由
+// client.prepareBody 调用 prepareBodyOpt 并传入 cache 参数。
 func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64) ([]byte, string) {
+	return prepareBodyOpt(src, sanitize, efforts, defaultEfforts, maxOut, "", "", false)
+}
+
+// prepareBodyOpt 是完整管线：injectCache=true 时在同一次 map 解析里注入
+// prompt_cache_key（优先级见 promptCacheKeyFor），避免二次 Unmarshal/Marshal。
+func prepareBodyOpt(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64, cacheUID, cacheConversation string, injectCache bool) ([]byte, string) {
 	if len(src) == 0 {
 		return src, ""
 	}
@@ -44,6 +79,9 @@ func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts 
 	if err := json.Unmarshal(src, &obj); err != nil {
 		return src, ""
 	}
+	// 先剥 realm 前缀：后续 injectCatalogMaxTokens / clampGPTMinMaxTokens /
+	// injectThinking / normalizeReasoningEffort 都按裸模型名查表，晚一步就会查空。
+	normalizeModelName(obj)
 	obj["stream"] = true
 	// max_completion_tokens → max_tokens 翻译（吸收上游 PR #116，Closes #117）：
 	// OpenAI 规范里 max_tokens 已 deprecated、max_completion_tokens 是新字段；
@@ -94,6 +132,12 @@ func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts 
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)
+		}
+	}
+	// prompt_cache_key：与 body 改写共用同一次 map，避免再 Unmarshal/Marshal 一遍。
+	if injectCache {
+		if key, ok := promptCacheKeyFor(obj, cacheUID, cacheConversation); ok {
+			obj["prompt_cache_key"] = key
 		}
 	}
 	out, err := json.Marshal(obj)

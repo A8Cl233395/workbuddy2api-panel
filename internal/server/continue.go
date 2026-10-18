@@ -446,7 +446,9 @@ func sumInto(dst, src map[string]any) {
 	}
 }
 
-// bareModelOf 从请求体取 model（仅日志用）。
+// bareModelOf 从请求体取裸模型名（续写日志与合成帧的 model 字段）。
+// 请求体可能带 cn:/global: 路由前缀（handler 不再提前改写，出站由
+// prepareBody 剥），这里必须同样剥掉，否则客户端会在续写帧里看到前缀。
 func bareModelOf(body []byte) string {
 	var obj struct {
 		Model string `json:"model"`
@@ -454,5 +456,6 @@ func bareModelOf(body []byte) string {
 	if json.Unmarshal(bytes.TrimSpace(body), &obj) != nil {
 		return "?"
 	}
-	return obj.Model
+	_, bare := resolveModel(obj.Model)
+	return bare
 }

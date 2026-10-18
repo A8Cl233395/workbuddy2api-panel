@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -628,7 +629,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 「会话历史里出现过的工具名」两个来源——实测 tools 声明会在中转环节丢失，
 	// 只认前者会让修复层在最需要它的场景下失效。
 	// 在提示词/模型名改写之前取（那些改写不动 tools / messages[].tool_calls 子树）。
-	declaredTools := upstream.ToolNameAllowlist(body)
+	declaredTools := toolNamesIfPresent(body)
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
@@ -640,7 +641,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
-	st := newChatStat(time.Now(), body, peek.Stream, h.budget)
+	st := newChatStat(time.Now(), peek.Model, peek.Stream, h.budget)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
@@ -687,7 +688,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// gateway_hint 判定所需的请求形态（image_url part）：在改写前取（与 turnKey
 	// 同理）。11133「模型不支持图片」指向的前提。
-	reqHasImage := hasImagePart(body)
+	reqHasImage := imagePartIfPresent(body)
 
 	// 在途租约：成功选中即占名额；函数出口（含成功 return 与 panic）统一释放。
 	var heldUID string
@@ -804,11 +805,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		degradedApplied = true
 	}
 
-	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，
-	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
-	if bareModel != peek.Model {
-		body = rewriteModel(body, bareModel)
-	}
+	// outbound model 名由 upstream.prepareBody 在同一次 JSON 解析里剥成裸名
+	// （realm 前缀是网关侧路由协议，上游不认前缀）。这里不再提前做整段
+	// parse+marshal，body 保留客户端原始模型名供日志/续写帧使用。
 
 	// 会话头族（issue #35）：后台按 X-Conversation-Request-ID（对话轮级）聚合请求，
 	// 官方客户端一次 user send 内所有 tool call/重试/换号复用同一个 ID。此处**轮转
@@ -1726,6 +1725,23 @@ func writeOpenAIQuotaError(w http.ResponseWriter, msg, hint string) {
 		e["gateway_hint"] = hint
 	}
 	writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": e})
+}
+
+// toolNamesIfPresent 是 ToolNameAllowlist 的廉价前置闸门：body 里没有 "tool
+// 或 "function 这类键前缀时不可能出现工具名，直接返回 nil（与解析结果为空的
+// 语义一致）。文本里偶然出现这些词只会多解析一次，不改变结果。
+func toolNamesIfPresent(body []byte) map[string]bool {
+	if !bytes.Contains(body, []byte(`"tool`)) && !bytes.Contains(body, []byte(`"function`)) {
+		return nil
+	}
+	return upstream.ToolNameAllowlist(body)
+}
+
+// imagePartIfPresent 是 hasImagePart 的前置闸门：hasImagePart 只认 content
+// part 的 type == "image_url"，它必然以 "image_url" 子串出现；没有该子串时
+// 跳过整段解析。
+func imagePartIfPresent(body []byte) bool {
+	return bytes.Contains(body, []byte(`"image_url"`)) && hasImagePart(body)
 }
 
 // hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态

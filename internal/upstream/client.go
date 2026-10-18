@@ -539,7 +539,7 @@ func ParseRateReset(body string) (time.Time, bool) {
 //  10. IsWafBlocked —— 403 且无业务信封（HTML 拦截页/空体/纯文本）：APISIX WAF
 //     拦截形态。判在通用 4xx 兜底**之前**：此前该形态落 ErrClient → 只换号不罚 →
 //     连环 403。带业务信封的 403 已被上方各层捕获，走不到本层。
-//  10.5 IsGatewayUnauthorized —— 401 且无业务信封（APISIX HTML 授权拒绝页）：
+//     10.5 IsGatewayUnauthorized —— 401 且无业务信封（APISIX HTML 授权拒绝页）：
 //     token 被上游判无效，refresh 亦回 invalid_grant ⇒ session 已作废。同上，落
 //     ErrClient 会让死号永久留在池里反复被选中，故归 ErrSessionDead。
 //  11. 11133 model_param_invalid / 11135 invalid_image_data —— 模型供应商拒绝参数、
@@ -925,10 +925,10 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) ([]
 		//（issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
-	body, effort := PrepareBodyOptWithEffortsDefaultAndCaps(body, c.SanitizeFingerprints.Load(), efforts, defs, maxOut)
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
-	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
-	body = InjectPromptCacheKey(body, uid, conversationID)
+	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。与 body 归一化共用
+	// prepareBodyOpt 的同一次 map 解析，不再二次 Unmarshal/Marshal。
+	body, effort := prepareBodyOpt(body, c.SanitizeFingerprints.Load(), efforts, defs, maxOut, uid, conversationID, true)
 	return body, effort
 }
 

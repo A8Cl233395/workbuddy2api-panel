@@ -660,3 +660,41 @@ func TestContinueReaderSeg2StreamCutBlindRetry(t *testing.T) {
 		t.Fatalf("续写成功后 length 终态不应外泄:\n%s", s)
 	}
 }
+
+func TestBareModelOfStripsRealmPrefix(t *testing.T) {
+	cases := []struct{ body, want string }{
+		{`{"model":"cn:glm-5.2"}`, "glm-5.2"},
+		{`{"model":"global:gpt-x"}`, "gpt-x"},
+		{`{"model":"glm-5.2"}`, "glm-5.2"},
+		{`{"model":"weird:model"}`, "weird:model"},
+		{`not json`, "?"},
+	}
+	for _, c := range cases {
+		if got := bareModelOf([]byte(c.body)); got != c.want {
+			t.Errorf("bareModelOf(%s) = %q, want %q", c.body, got, c.want)
+		}
+	}
+}
+
+// 请求体带路由前缀时，断流补的截断终态帧仍须是裸模型名。
+func TestContinueFrameUsesBareModel(t *testing.T) {
+	up, _ := fakeContinueUpstream(t, func(call int) (int, string) { return 200, testSeg2Text })
+	// 显式 max_tokens → limitSet，断流后不续写，直接补截断终态帧。
+	cut := `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"半截"}}]}` + "\n\n"
+	r := newTestContinueReader(t, up, `{"model":"cn:glm-5.2","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
+		io.NopCloser(strings.NewReader(cut)))
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	s := string(out)
+	if !strings.Contains(s, `"model":"glm-5.2"`) {
+		t.Fatalf("截断终态帧缺少裸模型名:\n%s", s)
+	}
+	if strings.Contains(s, `"model":"cn:glm-5.2"`) {
+		t.Fatalf("截断终态帧泄露了路由前缀:\n%s", s)
+	}
+	if !strings.Contains(s, `"finish_reason":"length"`) {
+		t.Fatalf("截断终态帧缺少 length:\n%s", s)
+	}
+}

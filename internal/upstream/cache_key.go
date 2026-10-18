@@ -16,6 +16,26 @@ import (
 	"strings"
 )
 
+// promptCacheKeyFor 计算应写入的 prompt_cache_key。ok=false 表示客户端已带非空
+// key，调用方必须保留原值（不覆盖、不重新序列化）。
+//
+// 优先级：客户端原值 > body 的 conversation_id > conversationId > 入参 conversationID。
+// 生成键按账号隔离（uid8 段），跨账号绝不碰撞。
+func promptCacheKeyFor(obj map[string]any, uid, conversationID string) (string, bool) {
+	// 优先级 1：客户端已显式带 key → 绝不覆盖。
+	if existing, ok := obj["prompt_cache_key"].(string); ok && existing != "" {
+		return "", false
+	}
+	// 优先级 2：body 里的 conversation_id / conversationId 做会话哈希源。
+	conv := conversationID
+	if v := strField(obj, "conversation_id"); v != "" {
+		conv = v
+	} else if v := strField(obj, "conversationId"); v != "" {
+		conv = v
+	}
+	return buildCacheKey(uid, conv), true
+}
+
 // InjectPromptCacheKey 在已改写的出站 body 上注入 prompt_cache_key 字段。
 //
 // 优先级：
@@ -32,6 +52,9 @@ import (
 // 入参 conversationID 为网关解析出的会话标识（body 里没有 conversation_id 时用它做哈希源）。
 // 两源都空时 convHex 为定值（每次新会话不复用前缀，但仍保留账号隔离段）。
 // body 不可解析时原样返回（与 prepareBody 语义一致：坏 body 不二次错误化）。
+//
+// 生产路径已在 prepareBody 的同一次解析里注入（见 prepareBodyOpt）；本函数保留为
+// 独立入口与测试锚点，两者共用 promptCacheKeyFor，规则不会漂移。
 func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 	if len(body) == 0 {
 		return body
@@ -40,18 +63,10 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
-	// 优先级 1：客户端已显式带 key → 绝不覆盖。
-	if existing, ok := obj["prompt_cache_key"].(string); ok && existing != "" {
-		return body
+	key, ok := promptCacheKeyFor(obj, uid, conversationID)
+	if !ok {
+		return body // 客户端已有非空 key：原样返回，不重新序列化
 	}
-	// 优先级 2：body 里的 conversation_id / conversationId 做会话哈希源。
-	conv := conversationID
-	if v := strField(obj, "conversation_id"); v != "" {
-		conv = v
-	} else if v := strField(obj, "conversationId"); v != "" {
-		conv = v
-	}
-	key := buildCacheKey(uid, conv)
 	obj["prompt_cache_key"] = key
 	out, err := json.Marshal(obj)
 	if err != nil {

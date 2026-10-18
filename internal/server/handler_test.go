@@ -2324,3 +2324,44 @@ func TestChatUserIDClientGetsPerConversationCacheSlot(t *testing.T) {
 		t.Fatalf("不同对话必须落在不同缓存槽（否则互相覆盖前缀缓存）：%q", keyOf(0))
 	}
 }
+
+// TestChatStripsRealmPrefixBeforeUpstream 钉住 model 前缀剥离发生在出站准备阶段：
+// 客户端发 cn: 前缀，上游必须只看到裸名；prompt_cache_key 仍正常注入。
+// （global: 的剥离在 upstream.SplitRealmPrefix 单测覆盖；本池只有 cn 账号。）
+func TestChatStripsRealmPrefixBeforeUpstream(t *testing.T) {
+	for _, model := range []string{"cn:glm-5.2", "glm-5.2"} {
+		t.Run(model, func(t *testing.T) {
+			var got []byte
+			up := &upstream.Client{
+				HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					got, _ = io.ReadAll(r.Body)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+						Body:       io.NopCloser(strings.NewReader(sseOK)),
+					}, nil
+				})},
+				ChatBaseCN:    "https://fake.example",
+				BillingBaseCN: "https://fake.example",
+			}
+			p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at-1", ExpiresAt: 9999999999})
+			h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
+			rec := httptest.NewRecorder()
+			body := `{"model":"` + model + `","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var obj map[string]any
+			if err := json.Unmarshal(got, &obj); err != nil {
+				t.Fatalf("upstream body unmarshal: %v (%s)", err, got)
+			}
+			if obj["model"] != "glm-5.2" {
+				t.Fatalf("upstream model = %v, want glm-5.2 (body=%s)", obj["model"], got)
+			}
+			if key, _ := obj["prompt_cache_key"].(string); key == "" {
+				t.Fatalf("prompt_cache_key missing from upstream body: %s", got)
+			}
+		})
+	}
+}

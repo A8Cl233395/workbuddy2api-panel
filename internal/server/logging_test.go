@@ -295,14 +295,11 @@ func TestRequestMetricsDetectsStreamErrorFrame(t *testing.T) {
 	}
 }
 
-func TestParseModelFromBody(t *testing.T) {
-	if got := parseModelFromBody([]byte(`{"model":"deepseek-v4-flash","stream":true}`)); got != "deepseek-v4-flash" {
+func TestNewChatStatModelFallback(t *testing.T) {
+	if got := newChatStat(time.Now(), "deepseek-v4-flash", true, nil).model; got != "deepseek-v4-flash" {
 		t.Errorf("got %q", got)
 	}
-	if got := parseModelFromBody([]byte(`{}`)); got != "-" {
-		t.Errorf("got %q want -", got)
-	}
-	if got := parseModelFromBody([]byte(`not json`)); got != "-" {
+	if got := newChatStat(time.Now(), "", false, nil).model; got != "-" {
 		t.Errorf("got %q want -", got)
 	}
 }
