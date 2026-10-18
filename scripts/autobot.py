@@ -136,8 +136,12 @@ def adapt(sha, base, branch, base_url, key, model, lines):
         f.write(body)
     code, msg = run("git", "apply", "--3way", PATCH, check=False)
     if code != 0:
-        say(lines, f"  {sha}: 补丁应用失败：\n```\n" + msg[:600] + "\n```")
-        return False
+        # 模型给的 diff 常在 hunk 头上写错行数（「corrupt patch」），--recount 让 git 重算；
+        # 真冲突（context 不匹配）它救不了，那就是摘要节选不够，得换人看。
+        code, msg = run("git", "apply", "--recount", "-C1", PATCH, check=False)
+        if code != 0:
+            say(lines, f"  {sha}: 补丁应用失败：\n```\n" + msg[:600] + "\n```")
+            return False
     code, msg = run("go", "test", "./...", check=False)
     if code != 0:
         run("git", "checkout", "-q", "--", ".")
