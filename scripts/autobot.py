@@ -56,7 +56,8 @@ def pi(task, timeout):
         with tempfile.TemporaryFile("w+") as fh:
             p = subprocess.Popen(
                 ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
-                 "--model", os.environ["LLM_MODEL"], "--no-session", "--approve", task],
+                 "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
+                 "-t", "read,write", task],
                 cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT, text=True,
                 start_new_session=True)
             try:
@@ -92,6 +93,23 @@ def up_clone(src):
     return d if code == 0 else ""
 
 
+def upstream_brief(up):
+    """上游清单：文件表 + 最近提交 + README 摘要。
+
+    shortcut: 不让 agent 自己在仓里翻。deepseek 走网关每轮往返几十秒，
+    让它探索 100+ 文件的仓 25 分钟也跑不完（实测三次全超时）。
+    """
+    files = run("git", "-C", up, "ls-files", check=False)[1].splitlines()[:200]
+    logs = run("git", "-C", up, "log", "--oneline", "-40", "--no-merges", check=False)[1]
+    readme = ""
+    for n in ("README.md", "readme.md", "README.zh-CN.md", "README_EN.md"):
+        f = os.path.join(up, n)
+        if os.path.isfile(f):
+            readme = open(f, encoding="utf-8", errors="replace").read()[:2500]
+            break
+    return files, logs, readme
+
+
 def report_path(src):
     return os.path.join(REPORT_DIR, src.replace("/", "__") + ".md")
 
@@ -110,10 +128,15 @@ def analyze(src, lines):
         return ""
     os.makedirs(REPORT_DIR, exist_ok=True)
     rp = report_path(src)
+    files, logs, readme = upstream_brief(up)
     task = (
-        f"上游仓库 {src} 已完整 clone 在 `{up}`（只读参考）。本仓是 WorkBuddy 的 Go 网关（当前目录）。\n"
+        f"上游仓库 {src} 已 clone 在 `{up}`（只读参考）。本仓是 WorkBuddy 的 Go 网关（当前目录）。\n"
         "任务：分析这个上游仓库与本仓的实现差异——它有哪些本仓还没有的功能、修过的 bug、"
         "更好的实现，哪些值得借鉴，以及要怎么适配到本仓。\n"
+        f"上游已有清单，不用自己遍历：\n文件（{len(files)} 个，最多）：\n"
+        + "\n".join(files) + "\n最近提交：\n" + logs
+        + ("\nREADME 摘要：\n" + readme if readme else "")
+        + "\n**最多读 6 个文件**（挑这 6 个里最能说明差异的），20 分钟内必须写出报告。\n"
         "只读：不要修改本仓任何文件、不要 commit、不要 push。\n"
         f"把结论写进 `{rp}`，严格用这个格式：\n"
         "值得度: 0-3（0=没有可借鉴；3=本仓明确缺这个能力）\n"
