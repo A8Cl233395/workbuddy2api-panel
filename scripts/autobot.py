@@ -31,6 +31,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORT = os.path.join(ROOT, "autobot-report.md")
 FORBIDDEN = {".github/workflows/", "AGENTS.md", "config.example.json"}
 PATCH = "/tmp/autobot.patch"
+# 自动化产出的提交用机器人身份；就近用 -c 传给单条命令，**不写 git config**——
+# 写仓库配置会污染本机手写的提交（2026-10-18 事故：3 个提交变成了 autobot）。
+BOT = ("-c", "user.name=github-actions[bot]",
+       "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com")
 
 
 def run(*args, check=True):
@@ -251,7 +255,7 @@ def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt"):
         say(lines, f"  {sha}: 适配后测试未通过：\n```\n" + msg[-1200:] + "\n```")
         return False, ""
     run("git", "add", "-A")
-    run("git", "commit", "-q", "-m", f"autobot: 适配上游 {sha}（LLM 改写，非原样移植）")
+    run("git", *BOT, "commit", "-q", "-m", f"autobot: 适配上游 {sha}（LLM 改写，非原样移植）")
     return True, mp
 
 
@@ -261,12 +265,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    # CI runner 没有 git 身份：cherry-pick 与适配提交都会死在 "Please tell me who you are"
-    # （本地验不出来，因为本地仓库先配过）。仓库级设一次，覆盖两条提交路径。
-    # 提交身份用 GitHub Actions 机器人（PR 的 author 仍是 AUTOBOT_TOKEN 的所有者：
-    # 用 GITHUB_TOKEN 开 PR 才显示 bot，但那样的 PR 不会再触发其它 workflow）。
-    run("git", "config", "user.name", "github-actions[bot]")
-    run("git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
+    # CI runner 本来没有 git 身份。身份只在要提交的命令上用 BOT 传 -c，不写 git config：
+    # 写仓库配置会污染本机手写提交（事故：3 个提交变成 autobot）。
+    # PR 的 author 仍是 AUTOBOT_TOKEN 的所有者——用 GITHUB_TOKEN 才显示 bot，但那样不再触发其它 workflow。
 
     cfg = yaml.safe_load(open(os.path.join(ROOT, "AutoBot.yml"), encoding="utf-8"))
     up, pol = cfg["upstream"], cfg["policy"]
@@ -371,7 +372,7 @@ def absorb(src, mode, up, pol, args, lines):
         run("git", "checkout", "-q", "-B", branch, pol["base"])
         how, ok, mp = "cherry-pick", False, ""
         if mode == "cherry-pick":
-            code, out = run("git", "cherry-pick", "-x", sha, check=False)
+            code, out = run("git", *BOT, "cherry-pick", "-x", sha, check=False)
             if code == 0:
                 code, out = run("go", "test", "./...", check=False)
                 ok = code == 0
