@@ -226,7 +226,7 @@ def pi_port(sha, lines, model):
             # PI 自带系统提示词 18.5KB + tools 共 22KB，超过上游约 19k 字符上限：
             # 会触发滚动摘要 → 撞 100s 边缘超时 504 → PI 收不到工具结果只能重试。
             # 极简提示词把整包压到约 3.3KB（实测）。
-            code, out = run("pi", "-p", "--provider", "ci", "--model", m,
+            code, out = run("pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci", "--model", m,
                             "--no-session", "--approve", "--no-context-files", "--no-skills",
                             "--system-prompt", PI_SYSPROMPT, task, check=False, timeout=900)
         except subprocess.TimeoutExpired:
@@ -327,6 +327,8 @@ def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt"):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", help="临时指定上游仓库（owner/name 或 URL），默认取 AutoBot.yml")
+    ap.add_argument("--mode", choices=["cherry-pick", "port"],
+                    help="配合 --repo 用；默认取 AutoBot.yml 的 repos_mode（兄弟项目=port）")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -337,7 +339,8 @@ def main():
     cfg = yaml.safe_load(open(os.path.join(ROOT, "AutoBot.yml"), encoding="utf-8"))
     up, pol = cfg["upstream"], cfg["policy"]
     if args.repo:
-        aims = [(args.repo, pol["mode"])]
+        # --repo 是「临时看别的仓」，默认按兄弟项目的 port 走；显式 --mode 优先
+        aims = [(args.repo, args.mode or up.get("repos_mode") or pol["mode"])]
     else:
         sibs = up.get("repos") or []
         n = up.get("repos_per_run") or len(sibs)
