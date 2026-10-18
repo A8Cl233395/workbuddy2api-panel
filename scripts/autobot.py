@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 
 import yaml
@@ -52,8 +53,13 @@ def llm(base, key, model, prompt):
     req = urllib.request.Request(
         base.rstrip("/") + "/chat/completions", data=body,
         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=300) as r:
-        return json.loads(r.read())["choices"][0]["message"]["content"]
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return json.loads(r.read())["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        # 只留 "HTTP Error 400" 等于没报错：网关的错误体（duck.ai 的 ERR_BAD_REQUEST
+        # 之类）才是可行动的信息，截 400 字节带出去。
+        raise RuntimeError(f"HTTP {e.code}: " + e.read()[:400].decode("utf-8", "replace")) from None
 
 
 def pick_json(text):
@@ -74,26 +80,35 @@ def adapt(sha, base, branch, base_url, key, model, lines):
     """让模型把上游提交改写成本仓能用的补丁，提交到 branch。返回是否成功。"""
     run("git", "checkout", "-q", "-B", branch, base)
     diff = run("git", "show", "--format=", sha)
-    ctx = []
-    for f in run("git", "show", "--name-only", "--format=", sha).split()[:6]:
+    files = run("git", "show", "--name-only", "--format=", sha).split()
+    excerpts = []
+    for f in files[:3]:
         fp = os.path.join(ROOT, f)
         if os.path.isfile(fp):
-            ctx.append(f"--- 本仓现有 {f}（节选） ---\n" + open(fp, encoding="utf-8").read()[:5000])
+            excerpts.append(f"--- 本仓现有 {f}（节选） ---\n" + open(fp, encoding="utf-8").read()[:2500])
         else:
-            ctx.append(f"--- {f} 在本仓不存在（可能是新文件，或本仓实现放在别处） ---")
-    prompt = (
-        "下面是一个上游提交的 diff。请把它**改写成本仓能直接用的补丁**——本仓是长期 fork，"
-        "同一功能往往已有不同实现，原样移植会冲突。只做达成原提交目的所必需的改动，"
-        "保持本仓既有风格与命名。\n\n"
-        "输出要求：只输出一个 ```diff 代码块，内容是 `git apply --3way` 能直接用的 unified "
-        "diff（含 diff --git / --- / +++ / @@ 行）。\n"
-        "无法安全适配时（拿不准、依赖本仓没有的抽象、或目的已由本仓其他代码达成），"
-        "只输出 {\"skip\": true} 和一句原因，不要输出补丁。\n\n"
-        f"===== 上游 diff（{sha}）=====\n{diff[:120000]}\n\n" + "\n\n".join(ctx))
-    try:
-        out = llm(base_url, key, model, prompt)
-    except Exception as e:  # noqa: BLE001
-        say(lines, f"  {sha}: 适配调用失败：{e}")
+            excerpts.append(f"--- {f} 在本仓不存在（新文件，或本仓实现在别处） ---")
+
+    def build(diff_cap, ex_cap):
+        return ("下面是一个上游提交的 diff。请把它**改写成本仓能直接用的补丁**——本仓是长期 fork，"
+                "同一功能往往已有不同实现，原样移植会冲突。只做达成原提交目的所必需的改动，"
+                "保持本仓既有风格与命名。\n\n"
+                "输出要求：只输出一个 ```diff 代码块，内容是 `git apply --3way` 能直接用的 unified "
+                "diff（含 diff --git / --- / +++ / @@ 行）。\n"
+                "无法安全适配时（拿不准、依赖本仓没有的抽象、或目的已由本仓其他代码达成），"
+                "只输出 {\"skip\": true} 和一句原因，不要输出补丁。\n\n"
+                f"===== 上游 diff（{sha}）=====\n{diff[:diff_cap]}\n\n" + "\n\n".join(ex_cap))
+
+    # 网关（duck.ai 系）对超长 prompt 直接 400，且不告诉你为什么：先按常规尺寸试，
+    # 失败了就砍到只剩 diff 再来一次。两次都失败才放弃这条候选。
+    out = None
+    for i, (cap, ex) in enumerate(((30000, excerpts), (6000, []))):
+        try:
+            out = llm(base_url, key, model, build(cap, ex))
+            break
+        except Exception as e:  # noqa: BLE001
+            say(lines, f"  {sha}: 第 {i + 1} 次适配调用失败：{e}")
+    if out is None:
         return False
     if '"skip"' in out[:400]:
         say(lines, f"  {sha}: 模型判定无法安全适配，跳过。")
@@ -103,7 +118,6 @@ def adapt(sha, base, branch, base_url, key, model, lines):
     code, msg = run("git", "apply", "--3way", PATCH, check=False)
     if code != 0:
         say(lines, f"  {sha}: 补丁应用失败：\n```\n" + msg[:600] + "\n```")
-        write_report(lines)
         return False
     code, msg = run("go", "test", "./...", check=False)
     if code != 0:
