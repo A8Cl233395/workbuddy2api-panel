@@ -145,9 +145,21 @@ def adapt(sha, base, branch, base_url, key, model, lines):
         if code != 0:
             say(lines, f"  {sha}: 补丁应用失败：\n```\n" + msg[:600] + "\n```")
             return False
+    # 兄弟项目的补丁可能整份搬 Python 进来：go test 照样全绿，但那只是垃圾文件
+    # 用 status 而不是 diff：git apply --3way 会把改动写进 index，diff 看不见；
+    # status 同时覆盖已暂存与未跟踪。已是本仓既有文件的（比如面板 js/html）放行，
+    # 新出现的非 Go 文件一律算外星文件。
+    tracked = set(run("git", "ls-tree", "-r", "--name-only", "HEAD").splitlines())
+    alien = [l[3:] for l in run("git", "status", "--porcelain", "-uall").splitlines()
+             if l[3:] not in tracked and not l[3:].endswith((".go", ".md"))]
+    if alien:
+        run("git", "reset", "-q", "--hard", "HEAD")
+        run("git", "clean", "-qfd")
+        say(lines, f"  {sha}: 补丁引入非 Go 文件 {alien[:5]}，丢弃。")
+        return False
     code, msg = run("go", "test", "./...", check=False)
     if code != 0:
-        run("git", "checkout", "-q", "--", ".")
+        run("git", "reset", "-q", "--hard", "HEAD")
         run("git", "clean", "-qfd")
         say(lines, f"  {sha}: 适配后测试未通过：\n```\n" + msg[-1200:] + "\n```")
         return False
@@ -169,16 +181,34 @@ def main():
 
     cfg = yaml.safe_load(open(os.path.join(ROOT, "AutoBot.yml"), encoding="utf-8"))
     up, pol = cfg["upstream"], cfg["policy"]
-    src = (args.repo or up["repo"]).replace("https://github.com/", "").replace(".git", "").strip("/")
+    if args.repo:
+        aims = [(args.repo, pol["mode"])]
+    else:
+        aims = [(up["repo"], pol["mode"])] + [(r, up.get("repos_mode", pol["mode"]))
+                                             for r in (up.get("repos") or [])]
     lines = ["# AutoBot 报告", ""]
+    opened = 0
+    for raw, mode in aims:
+        src = raw.replace("https://github.com/", "").replace(".git", "").strip("/")
+        say(lines, "")
+        say(lines, f"## {src}")
+        # 上一条可能停在 autobot/<sha> 上（测试失败或已开 PR），换上游前必须回基线：
+        # 否则下一条的 git cherry 会拿错 HEAD 比对，分支也从错的地方拉出来。
+        run("git", "checkout", "-q", pol["base"])
+        opened += absorb(src, mode, up, pol, args, lines)
+        if opened >= pol["max_prs_per_run"]:
+            break
+    write_report(lines)
+    return 0
 
+
+def absorb(src, mode, up, pol, args, lines):
     # 1) 拉上游：--repo 可临时换别家，走同一个 src remote
     run("git", "remote", "remove", "src", check=False)
     run("git", "remote", "add", "src", f"https://github.com/{src}.git")
     code, msg = run("git", "fetch", "-q", "src", "main", check=False)
     if code != 0:
         say(lines, f"拉取 {src} 失败：{msg[:300]}")
-        write_report(lines)
         return 0
 
     # 2) 候选：最近 N 条非 merge、非 chore 提交
@@ -194,7 +224,6 @@ def main():
     cands = [c for c in cands if f"refs/heads/{pol['branch_prefix']}{c[0]}" not in tried]
     if not cands:
         say(lines, f"{src}：没有未处理的新提交（已去 merge/chore/已吸收/已试过）。")
-        write_report(lines)
         return 0
     say(lines, f"{src}：候选 {len(cands)} 条（最近 {up['limit']} 条上游提交，已去 merge/chore/已吸收）。")
 
@@ -211,12 +240,14 @@ def main():
         say(lines, "未配置 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL：只出候选清单，不开 PR。")
         say(lines)
         say(lines, listing)
-        write_report(lines)
         return 0
 
     # 4) 让模型排序：挑哪条、为什么、风险、置信度
+    note = "" if mode == "cherry-pick" else (
+        f"注意：{src} 是另一套实现（语言/结构不同），代码不能直接搬，只能借鉴思路与接口设计；"
+        "只有你能说清「本仓对应模块在哪、怎么改」时才算值得挑。\n")
     prompt = (
-        "你在给一个 fork 挑选值得吸收的上游提交。本仓是 workbuddy2api-panel 的长期 fork，"
+        note + "你在给一个 fork 挑选值得吸收的上游提交。本仓是 workbuddy2api-panel 的长期 fork，"
         "缓存键、补偿、检索、签到、面板、调度都有自有实现。\n"
         "按值得程度挑**最多 3 条**：优先真 bug 修复、改动小、目的清晰。输出 JSON："
         "{\"picks\":[{\"sha\":\"...\",\"why\":\"一句话\",\"risk\":\"一句话\",\"confidence\":0-3}]}。"
@@ -226,11 +257,9 @@ def main():
                  if p.get("sha")]
     except Exception as e:  # noqa: BLE001 —— LLM 侧任何失败都降级成报告
         say(lines, f"LLM 调用失败，本次不开 PR：{e}")
-        write_report(lines)
         return 0
     if not picks:
         say(lines, "模型判定没有值得吸收的候选。")
-        write_report(lines)
         return 0
     say(lines, "模型排序：" + " · ".join(f"{p['sha']}({p.get('confidence')})" for p in picks))
 
@@ -248,24 +277,27 @@ def main():
             continue
         if args.dry_run:
             say(lines, f"{sha}: dry-run 命中（{pick.get('why', '')}），不落地。")
-            write_report(lines)
             return 0
         branch = pol["branch_prefix"] + sha
         run("git", "checkout", "-q", "-B", branch, pol["base"])
-        code, out = run("git", "cherry-pick", "-x", sha, check=False)
-        how = "cherry-pick"
-        if code != 0:
-            run("git", "cherry-pick", "--abort", check=False)
-            say(lines, f"{sha}: 原样移植冲突，改试 LLM 适配。")
+        how, ok = "cherry-pick", False
+        if mode == "cherry-pick":
+            code, out = run("git", "cherry-pick", "-x", sha, check=False)
+            if code == 0:
+                code, out = run("go", "test", "./...", check=False)
+                ok = code == 0
+                if not ok:
+                    run("git", "checkout", "-q", pol["base"])
+                    say(lines, f"{sha}: 移植后测试未通过，换下一条。\n```\n" + out[-1200:] + "\n```")
+                    continue
+            else:
+                run("git", "cherry-pick", "--abort", check=False)
+        if not ok:
+            # 兄弟项目不是本仓 fork：代码搬过来只会变成垃圾文件，只能借鉴思路
+            say(lines, f"{sha}: " + ("直搬失败" if mode == "cherry-pick" else "跳过直搬") + "，改试 LLM 适配。")
             if not adapt(sha, pol["base"], branch, base_url, key, model, lines):
                 continue
             how = "LLM 适配"
-        else:
-            code, out = run("go", "test", "./...", check=False)
-            if code != 0:
-                run("git", "checkout", "-q", pol["base"])
-                say(lines, f"{sha}: 移植后测试未通过，换下一条。\n```\n" + out[-1200:] + "\n```")
-                continue
         run("git", "push", "-q", "-u", "origin", branch)
         run("gh", "label", "create", pol["label"], "--repo", os.environ["GITHUB_REPOSITORY"],
             "--color", "ededed", "--description", "AutoBot 自动挑选的上游改动", check=False)
@@ -276,8 +308,7 @@ def main():
         run("gh", "pr", "create", "--repo", os.environ["GITHUB_REPOSITORY"], "--base", pol["base"],
             "--head", branch, "--title", title, "--body", body, "--label", pol["label"])
         say(lines, f"已开 PR（{how}）：{branch}")
-        write_report(lines)
-        return 0
+        return 1
 
     say(lines, "候选都不满足条件，本次不开 PR（只出报告）。")
     write_report(lines)
