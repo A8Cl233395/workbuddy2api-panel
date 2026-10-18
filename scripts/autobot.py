@@ -217,7 +217,8 @@ def main():
 
     cfg = yaml.safe_load(open(os.path.join(ROOT, "AutoBot.yml"), encoding="utf-8"))
     up, pol = cfg["upstream"], cfg["policy"]
-    repos = [args.repo] if args.repo else [r["repo"] for r in up["repos"]]
+    repos = [args.repo] if args.repo else [r["repo"] if isinstance(r, dict) else r
+                                          for r in up["repos"]]
     lines = ["# AutoBot 报告", ""]
 
     if args.phase in ("analyze", "all"):
