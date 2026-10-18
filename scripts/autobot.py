@@ -57,7 +57,7 @@ def pi(task, timeout):
             p = subprocess.Popen(
                 ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
                  "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
-                 "-t", "read,write", task],
+                 "--mode", "json", "-t", "read,write", task],
                 cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT, text=True,
                 start_new_session=True)
             try:
