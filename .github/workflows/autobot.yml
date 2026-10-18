@@ -57,7 +57,8 @@ jobs:
               "apiKey": os.environ["LLM_API_KEY"],
               "api": "openai-completions",
               "models": [{"id": os.environ["LLM_MODEL"], "name": "ci",
-                          "contextWindow": 128000, "maxTokens": 8192}]}}}
+                          "contextWindow": int(os.environ.get("LLM_CONTEXT") or 524288),
+                          "maxTokens": int(os.environ.get("LLM_MAX_TOKENS") or 32768)}]}}}
           open(os.path.join(d, "models.json"), "w").write(json.dumps(cfg))
           PY
           pi --list-models

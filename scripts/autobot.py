@@ -227,8 +227,9 @@ def pi_port(sha, lines, model):
             # PI 自带系统提示词 18.5KB + tools 共 22KB，超过上游约 19k 字符上限：
             # 会触发滚动摘要 → 撞 100s 边缘超时 504 → PI 收不到工具结果只能重试。
             # 极简提示词把整包压到约 3.3KB（实测）。
+            # 不做上下文裁剪：agnes 有 512K，PI 该怎么用就怎么用（AGENTS.md、skills 都放行）
             argv = ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci", "--model", m,
-                    "--no-session", "--approve", "--no-context-files", "--no-skills"]
+                    "--no-session", "--approve"]
             # 默认用 PI 自带的系统提示词（原生 tool calling 的端点工具纪律更好）；
             # PI_TERSE=1 才换极简版——那是给 19k 输入上限的 duck 用的。
             if os.environ.get("PI_TERSE"):
