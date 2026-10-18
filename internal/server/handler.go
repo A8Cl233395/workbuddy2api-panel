@@ -659,6 +659,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := session.ExtractKey(body)
+	// 缓存槽会话段：sessKey 优先；sessKey 为空（典型是只发 user_id 的客户端，见
+	// session.ExtractKey 的 anti-monopoly 闸）时用内容派生键——否则这些客户端的
+	// prompt_cache_key 退化成每账号一个常量槽，同账号上多段对话互相覆盖前缀缓存
+	// （issue #5：glm-5.3 大上下文周期性命中率掉到 0.2%）。
+	// 只供缓存槽使用：账号绑定仍只认 sessKey，不复活 user 维度粘性。
+	cacheKeyID := sessKey
+	if cacheKeyID == "" {
+		cacheKeyID = session.DeriveCacheKey(body)
+	}
 	stickyUID := ""
 	if h.cfg.Session != nil && sessKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
@@ -816,7 +825,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// conversation_id 的客户端也能各占一个前缀缓存槽，不再全账号共用一个）。
 	chatMeta := upstream.ChatMeta{
 		ConversationID: session.ResolveConversationID(body),
-		CacheKeyID:     sessKey,
+		CacheKeyID:     cacheKeyID,
 	}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
