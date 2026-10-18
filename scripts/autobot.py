@@ -289,10 +289,16 @@ def candidates_of(branch, up, pol, limit=12):
     return cands[:limit]
 
 
-def listing_of(src, cands):
-    return [f"- {src} {sha} {date} {subj} | " +
-            run("git", "show", "--stat=0", "--name-only", "--format=", sha).replace("\n", ",")
-            for sha, date, subj in cands]
+def listing_of(src, cands, cap=300):
+    """每条一行：仓库 sha 日期 标题 | 改动文件。文件列表要截——大仓一次改上千个文件，
+    6 个仓的清单能把 512K 上下文直接顶爆（实测 49 万 token 被拒）。"""
+    rows = []
+    for sha, date, subj in cands:
+        files = run("git", "show", "--stat=0", "--name-only", "--format=", sha).replace("\n", ",")
+        if len(files) > cap:
+            files = files[:cap] + "…"
+        rows.append(f"- {src} {sha} {date} {subj} | {files}")
+    return rows
 
 
 def judge(srcs, cands_by_src, up, pol, lines, top):
@@ -362,6 +368,9 @@ def land(src, mode, sha, why, risk, pol, args, lines):
         say(lines, f"{sha}: dry-run 命中（{why}），不落地。")
         return 0
     branch = pol["branch_prefix"] + sha
+    # 上一条若在 adapt 里失败，index 还停在冲突态，chekcout -B 会报「resolve your index first」
+    run("git", "reset", "-q", "--hard", "HEAD", check=False)
+    run("git", "clean", "-qfd", check=False)
     run("git", "checkout", "-q", "-B", branch, pol["base"])
     base_url = os.environ.get("LLM_BASE_URL", "")
     key = os.environ.get("LLM_API_KEY", "")
