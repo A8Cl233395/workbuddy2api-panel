@@ -1411,13 +1411,19 @@ const els = {};
 const ctx = {
   Date, Math, Number, String, isFinite,
   PK_DAY_MS: 86400000,
-  $: id => (els[id] = els[id] || { innerHTML: '', textContent: '', addEventListener: () => {} }),
+  $: id => (els[id] = els[id] || {
+    innerHTML: '', textContent: '', addEventListener: () => {},
+    querySelector: () => null,   // 无按钮桩 → applyRestToggle 取不到按钮直接返回
+  }),
   esc: s => String(s == null ? '' : s),
   fmtTok: v => String(v == null ? 0 : v),
   pkExpiryDateTime: ms => new Date(ms).toISOString(),   // 只取前 10 位，时区口径由真函数负责
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+// 展开态恢复由 TestAppJSExpiryRestToggleSurvivesRerender 专测；本用例的 tbody 桩没有按钮，
+// applyRestToggle 用 querySelector 取不到按钮会直接返回，不影响渲染断言。
+vm.runInContext('const restOpen = Object.create(null);\n' +
+  src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
 const day = n => new Date(Date.now() + n * 86400000).toISOString();
 ctx.renderExpirySnapshot({ accounts: [
   { uid: 'aaaaaaaa-1', nickname: '秋',     credits_earliest_expiry: day(20), credits_earliest_remaining: 499 },
@@ -1567,15 +1573,17 @@ const start = src.indexOf('/* ══ 官方补偿（上游 PR #196）');
 const end = src.indexOf('let lastPackages');
 if (start < 0 || end < start) throw new Error('compensation block not found');
 // 收纳行的点击处理在到期提醒那段（两个卡片共用），单独切过来一起跑。
-const tStart = src.indexOf('function bindRestToggle(id)');
+// restOpen 是模块级状态（渲染重建 tbody 后靠它恢复展开态），这里按真实作用域声明。
+const tStart = src.indexOf('// 按 restOpen 把指定 tbody 的收纳行');
 const tEnd = src.indexOf("bindRestToggle('compBody');") + "bindRestToggle('compBody');".length;
 if (tStart < 0 || tEnd < tStart) throw new Error('bindRestToggle not found');
-const toggleSrc = src.slice(tStart, tEnd);
+const toggleSrc = 'const restOpen = Object.create(null);\n' + src.slice(tStart, tEnd);
 const els = {};
 function el(id) {
   if (!els[id]) els[id] = {
-    textContent: '', innerHTML: '', hidden: false, rows: [], handlers: {},
+    textContent: '', innerHTML: '', hidden: false, rows: [], btn: null, handlers: {},
     addEventListener(ev, fn) { this.handlers[ev] = fn; },
+    querySelector(sel) { return sel === 'button[data-exp-rest]' ? this.btn : null; },
     querySelectorAll() { return this.rows; },
   };
   return els[id];
@@ -1593,7 +1601,8 @@ const ctx = {
 };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) + '\n' + toggleSrc +
-  '\nthis.renderCompensation = renderCompensation; this.setData = (d) => { compData = d; };', ctx);
+  '\nthis.renderCompensation = renderCompensation; this.setData = (d) => { compData = d; };' +
+  ' this.applyRestToggle = applyRestToggle; this.restOpen = restOpen;', ctx);
 
 ctx.setData({ errored: 1, accounts: [
   { uid: 'bbbbbbbb-2', nickname: '已领号', active: true, claimed: true, credit: 500, end_time: '2026-10-22 23:59:59' },
@@ -1619,24 +1628,36 @@ process.stdout.write(JSON.stringify({
   pendingFirst: body.indexOf('待领号') < body.indexOf('已领号'),
   hiddenRows: (body.match(/data-exp-row="rest" hidden/g) || []).length,
   toggle: body.includes('data-exp-rest="2"') && body.includes('其余 2 个账号，展开'),
-  // 点一次收纳按钮：2 行必须真展开（展开逻辑与到期提醒共用 bindRestToggle）
+  // 点一次收纳按钮：2 行必须真展开（展开逻辑与到期提醒共用 bindRestToggle）；
+  // 再模拟一次 5s 轮询重渲染，展开态必须由 restOpen 恢复，而不是被收回。
   expandWorks: (() => {
-    const rows = [{ hidden: true }, { hidden: true }];
     const tbody = els['compBody'];
-    tbody.rows = rows;
-    const btn = {
-      dataset: { expRest: '2' }, textContent: '', attrs: {},
+    tbody.rows = [{ hidden: true }, { hidden: true }];
+    tbody.btn = {
+      dataset: { expRest: '2' }, textContent: '其余 2 个账号，展开', attrs: { 'aria-expanded': 'false' },
       getAttribute(k) { return this.attrs[k]; },
       setAttribute(k, v) { this.attrs[k] = v; },
-      closest() { return tbody; },
     };
     const click = () => tbody.handlers.click({
-      target: { closest: (sel) => (sel === 'button[data-exp-rest]' ? btn : null) },
+      target: { closest: (sel) => (sel === 'button[data-exp-rest]' ? tbody.btn : null) },
     });
     click();
-    const opened = rows.every(r => r.hidden === false) && btn.textContent === '收起其余 2 个账号';
+    const opened = tbody.rows.every(r => r.hidden === false) &&
+      tbody.btn.textContent === '收起其余 2 个账号' &&
+      tbody.btn.attrs['aria-expanded'] === 'true';
+    // 重渲染：新行/新按钮回到折叠默认态，再由 applyRestToggle 恢复。
+    tbody.rows = [{ hidden: true }, { hidden: true }];
+    tbody.btn = {
+      dataset: { expRest: '2' }, textContent: '其余 2 个账号，展开', attrs: { 'aria-expanded': 'false' },
+      getAttribute(k) { return this.attrs[k]; },
+      setAttribute(k, v) { this.attrs[k] = v; },
+    };
+    ctx.applyRestToggle(tbody, ctx.restOpen.compBody);
+    const survived = tbody.rows.every(r => r.hidden === false) &&
+      tbody.btn.textContent === '收起其余 2 个账号';
     click();
-    return opened && rows.every(r => r.hidden === true) && btn.textContent === '其余 2 个账号，展开';
+    return opened && survived && tbody.rows.every(r => r.hidden === true) &&
+      tbody.btn.textContent === '其余 2 个账号，展开';
   })(),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "comp-card-*.cjs")
@@ -1715,6 +1736,115 @@ func TestPanelCompensationWiring(t *testing.T) {
 	}
 }
 
+// TestAppJSExpiryRestToggleSurvivesRerender 钉住「其余 N 个账号」的展开态不会被 5s 轮询自动收起。
+//
+// 根因：账号池每 5s 调 loadOverview → renderExpirySnapshot 重建 #expBody.innerHTML；展开状态
+// 原先只写在 DOM（aria-expanded / hidden）上，重建即丢（用户看到「点展开后什么都不点又收起」）。
+// 现在状态存在模块级 restOpen，渲染后由 applyRestToggle 恢复；本测试同时钉住两个渲染函数的
+// 调用接线（只存状态不恢复，行为仍会回退）。
+func TestAppJSExpiryRestToggleSurvivesRerender(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; rest toggle test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('// 按 restOpen 把指定 tbody 的收纳行');
+const end = src.indexOf("bindRestToggle('compBody');") + "bindRestToggle('compBody');".length;
+if (start < 0 || end < 0) throw new Error('rest toggle block not found');
+
+// 极简 tbody 桩：只实现 applyRestToggle / bindRestToggle 用到的 querySelector(All) 与事件。
+function makeBody(n) {
+  const o = {
+    rows: [], btn: null, handlers: {},
+    addEventListener(ev, fn) { this.handlers[ev] = fn; },
+    querySelector(sel) { return sel === 'button[data-exp-rest]' ? this.btn : null; },
+    querySelectorAll(sel) { return sel === 'tr[data-exp-row="rest"]' ? this.rows : []; },
+  };
+  reset(o, n);
+  return o;
+}
+function reset(o, n) {
+  o.rows = Array.from({ length: n }, () => ({ hidden: true }));
+  o.btn = {
+    dataset: { expRest: String(n) },
+    textContent: '其余 ' + n + ' 个账号，展开',
+    attrs: { 'aria-expanded': 'false' },
+    getAttribute(k) { return this.attrs[k]; },
+    setAttribute(k, v) { this.attrs[k] = v; },
+  };
+}
+const bodies = { expBody: makeBody(7), compBody: makeBody(2) };
+const $ = id => bodies[id] || null;
+const ctx = { $ };
+vm.createContext(ctx);
+vm.runInContext('const restOpen = Object.create(null);\n' + src.slice(start, end) +
+  '\nthis.restOpen = restOpen; this.applyRestToggle = applyRestToggle;', ctx);
+
+function click(body) {
+  body.handlers.click({ target: { closest: sel => (sel === 'button[data-exp-rest]' ? body.btn : null) } });
+}
+const exp = bodies.expBody;
+click(exp);
+const opened = { hidden: exp.rows.map(r => r.hidden), aria: exp.btn.attrs['aria-expanded'], text: exp.btn.textContent };
+// 模拟 5s 轮询重建 tbody：行/按钮回到折叠默认态，渲染函数随后按 restOpen 恢复。
+reset(exp, 7);
+ctx.applyRestToggle(exp, ctx.restOpen.expBody);
+const survived = { hidden: exp.rows.map(r => r.hidden), aria: exp.btn.attrs['aria-expanded'], text: exp.btn.textContent };
+// 两张卡片的状态必须独立：展开到期提醒不能顺带展开官方补偿。
+const independent = bodies.compBody.rows.every(r => r.hidden === true);
+click(exp);
+const collapsed = { hidden: exp.rows.map(r => r.hidden), aria: exp.btn.attrs['aria-expanded'], text: exp.btn.textContent };
+process.stdout.write(JSON.stringify({ opened, survived, independent, collapsed }));`
+	f, err := os.CreateTemp(t.TempDir(), "rest-toggle-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rest toggle node test failed: %v\n%s", err, out)
+	}
+	const all = "[false,false,false,false,false,false,false]"
+	const none = "[true,true,true,true,true,true,true]"
+	want := `{"opened":{"hidden":` + all + `,"aria":"true","text":"收起其余 7 个账号"},` +
+		`"survived":{"hidden":` + all + `,"aria":"true","text":"收起其余 7 个账号"},` +
+		`"independent":true,"collapsed":{"hidden":` + none + `,"aria":"false","text":"其余 7 个账号，展开"}}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("收纳行展开/恢复不符:\n got=%s\nwant=%s", strings.TrimSpace(string(out)), want)
+	}
+
+	// 接线：两个渲染函数都必须在重建 innerHTML 之后恢复状态（先恢复会被随后的重建覆盖）。
+	raw, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsStr := string(raw)
+	for _, fn := range []struct{ name, call string }{
+		{"renderExpirySnapshot", "applyRestToggle($('expBody'), restOpen.expBody);"},
+		{"renderCompensation", "applyRestToggle(body, restOpen.compBody);"},
+	} {
+		at := strings.Index(jsStr, "function "+fn.name+"(")
+		if at < 0 {
+			t.Fatalf("app.js 找不到 %s", fn.name)
+		}
+		body := jsStr[at:]
+		if end := strings.Index(body, "\n}\n"); end > 0 {
+			body = body[:end]
+		}
+		rebuild := strings.Index(body, ".innerHTML")
+		restore := strings.Index(body, fn.call)
+		if rebuild < 0 || restore < 0 || restore < rebuild {
+			t.Errorf("%s 未在重建 innerHTML 后恢复收纳展开态（innerHTML@%d restore@%d）",
+				fn.name, rebuild, restore)
+		}
+	}
+}
+
 // TestAppJSModelBusyTag 模型行渲染行为：busy/congested 必须出标签（bad 色），
 // idle/normal 与缺字段必须安静——「模型与档位」是唯一能看到 congested/unavailable 的地方。
 // 行为断言而非字符串断言：后者在 `if (false)` 这种「代码在但永远不跑」下仍会通过。
@@ -1786,13 +1916,15 @@ const end = src.indexOf('// 收纳行展开/收起');
 if (start < 0 || end < 0) throw new Error('expiry snapshot helpers not found');
 const ctx = {
   Number, String, Array, Date, Math, JSON, PK_DAY_MS: 86400000,
-  expBody: { innerHTML: '' }, expNote: { textContent: '' },
+  expBody: { innerHTML: '', querySelector: () => null }, expNote: { textContent: '' },
   esc: s => String(s), fmtTok: n => String(n),
   pkExpiryDateTime: ms => new Date(ms).toISOString(),
 };
 ctx.$ = id => ctx[id];
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot=renderExpirySnapshot;', ctx);
+// 展开态恢复另有专测；这里只断言快照/排序/兜底渲染（桩无按钮 → applyRestToggle 直接返回）。
+vm.runInContext('const restOpen = Object.create(null);\n' +
+  src.slice(start, end) + '\nthis.renderExpirySnapshot=renderExpirySnapshot;', ctx);
 const day = n => {
   const d = new Date(Date.now() + n * 86400000);
   const parts = new Intl.DateTimeFormat('en-US', {
