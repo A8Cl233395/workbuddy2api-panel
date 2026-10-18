@@ -172,7 +172,7 @@ def implement(src, idea, lines):
         "优缺点: 好处与代价\n"
         "影响: 对现有行为/配置/性能的影响与风险\n"
     )
-    code, out = pi(task, int(os.environ.get("PI_IMPLEMENT_TIMEOUT") or 2400))
+    code, out = pi(task, int(os.environ.get("PI_IMPLEMENT_TIMEOUT") or 3600))
     changed = run("git", "status", "--porcelain", "-uall", check=False)[1].strip()
     if code != 0 or not changed:
         say(lines, f"{src}: 实现未产出（退出码 {code}）｜{out}")
@@ -295,8 +295,13 @@ def main():
         reports.sort(reverse=True)
         picked = [(s, p) for s, p in reports if s >= 2][:int(up.get("land_max") or 2)]
         say(lines, "落地候选：" + (", ".join(f"{os.path.basename(p)}({s})" for s, p in picked) or "无"))
-        for _score, p in picked:
-            land(os.path.basename(p)[:-3].replace("__", "/"), p, pol, args, lines)
+        landed = sum(1 for _s, p in picked
+                     if land(os.path.basename(p)[:-3].replace("__", "/"), p, pol, args, lines))
+        if picked and not landed and not args.dry_run:
+            # 有候选却一条都没落成（超时/闸门）必须红，别报成功
+            say(lines, "有候选但没有任何一条落地")
+            write_report(lines)
+            return 1
 
     write_report(lines)
     return 0
