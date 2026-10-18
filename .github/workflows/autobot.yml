@@ -87,7 +87,7 @@ jobs:
       - run: python3 -m pip install --quiet pyyaml
       - name: 分析这一片
         # 指定单仓时只有第 0 片干活，其余跳过（job 级 if 引用不了 matrix，只能放这里）
-        if: inputs.repo == '' || matrix.shard == '0/17'
+        if: inputs.repo == '' || startsWith(matrix.shard, '0/')
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}

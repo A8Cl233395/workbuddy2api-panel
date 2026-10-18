@@ -73,8 +73,8 @@ upstream:
     - fancylear/dsh-workbuddy-credits
     - Libra1337/Reso2api
 
-  # 分片大小：66 个仓在一个 job 里串行分析跑不完，matrix 按片并行（每片这么多个仓）
-  shard_size: 4
+  # 一个仓库一个 job：每个仓独立 clone、独立分析，互不影响
+  shard_size: 1
   # 每轮最多真正落地几条（每条要起 agent 写代码、跑测试、开 PR）
   land_max: 2
 
