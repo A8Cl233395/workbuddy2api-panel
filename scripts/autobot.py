@@ -36,11 +36,6 @@ FORBIDDEN = {".github/workflows/", "AGENTS.md", "config.example.json"}
 PATCH = "/tmp/autobot.patch"
 # 自动化产出的提交用机器人身份；就近用 -c 传给单条命令，**不写 git config**——
 # 写仓库配置会污染本机手写的提交（2026-10-18 事故：3 个提交变成了 autobot）。
-# 极简系统提示词：默认那份 18.5KB 会顶穿上游输入上限（见 pi_port）
-PI_SYSPROMPT = ("你是编码助手，手上确实有 bash/read/edit/write 四个工具，它们由本次请求的客户端注册并执行，"
-                "你输出调用后客户端会把结果回传。第一步就调用它们，不要询问许可、不要说没有工具、不要只给计划；"
-                "改完自己跑 go build/vet/test。")
-_pi_deadline = None  # 本轮 PI 时间预算的截止（秒），跨条目共享
 BOT = ("-c", "user.name=github-actions[bot]",
        "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com")
 
@@ -105,52 +100,6 @@ def tracked_files():
     return set(run("git", "ls-tree", "-r", "--name-only", "HEAD").splitlines())
 
 
-def port_excerpts(sha, limit=3):
-    """跨语言移植的上下文：拿上游的标识符去本仓 Go 源码里找同类模块。
-
-    只按「有没有命中」取文件会全是 cmd/* 这种大杂烩（通用词处处命中），
-    所以按「命中的不同标识符数 / 文件大小的平方根」排序——同领域的模块才会赢。
-    """
-    diff = run("git", "show", "--format=", sha)
-    toks = {t for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{4,}", diff)
-            if t.lower() not in {"import", "return", "class", "self", "none", "true", "false",
-                                 "async", "await", "python", "raise", "except", "print", "value",
-                                 "string", "request", "response", "error", "message", "content"}}
-    toks = sorted(toks)[:40]
-    args = ["git", "grep", "-c", "-w", "-i"]
-    for t in toks:
-        args += ["-e", t]
-    args += ["--", "*.go"]
-    code, out = run(*args, check=False)
-    cand = []
-    for line in out.splitlines():
-        f, _, n = line.rpartition(":")
-        if f and f.endswith(".go") and "_test.go" not in f:
-            cand.append(f)
-    scored = []
-    for f in cand[:80]:
-        fp = os.path.join(ROOT, f)
-        if not os.path.isfile(fp):
-            continue
-        src = open(fp, encoding="utf-8", errors="replace").read()
-        low = src.lower()
-        hit = sum(1 for t in toks if t.lower() in low)
-        if hit:
-            scored.append((hit / (len(src) ** 0.5 + 1), f, hit, low))
-    scored.sort(reverse=True)
-    ex = []
-    for _, f, hit, low in scored[:limit]:
-        lines = low.splitlines()
-        hit_line = next((i for i, l in enumerate(lines)
-                         if any(t.lower() in l for t in toks)), 0)
-        lo, hi = max(0, hit_line - 30), min(len(lines), hit_line + 60)
-        ex.append(f"--- 本仓同类模块 {f}（命中 {hit} 个上游标识符；第 {lo + 1}-{hi} 行）---\n"
-                  + "\n".join(lines[lo:hi]))
-    ex.append("--- 本仓 Go 文件树（前 300 个）---\n"
-              + "\n".join(sorted(f for f in tracked_files() if f.endswith(".go"))[:300])[:6000])
-    return ex
-
-
 def finish(sha, lines, mode, mp=""):
     """落地前的公共闸门：外星文件、孤儿实现、build/vet/test，全绿才提交。"""
     # 兄弟项目的补丁可能整份搬 Python 进来：go test 照样全绿，但那只是垃圾文件
@@ -198,47 +147,32 @@ def finish(sha, lines, mode, mp=""):
     return True, mp
 
 def pi_port(sha, lines, model):
-    """跨语言移植交给 PI 的 agent 循环：它自己 grep/读/改/跑测试。
-
-    一次性 prompt 的瓶颈是上下文——模型看不到调用链只能回 skip（实测四条全 skip）。
-    """
+    """把一个上游提交交给 PI：它自己 grep/读/改/跑测试，链路与手动使用 PI 一致。"""
     task = (
-        f"第一步：立刻调用 bash 执行 `git show --stat {sha}` 与 `git show {sha}`，不要先解释。"
-        f"本仓是 Go 项目，上游提交 {sha} 是另一种语言（多为 Python）的实现。\n"
-        "任务：读懂它修正或新增的行为，在本仓用 Go 实现同样的行为，并接进真实的调用路径。\n"
-        "必须修改至少一个既有 .go 文件；跑 `go build ./...`、`go vet ./...`、`go test ./...`，"
-        "全绿才算完成；完成后加一条能钉住该行为的测试。\n"
-        "你已拥有 read/bash/edit/write 工具：直接调用，不要询问许可、不要只给计划等确认。\n"
+        f"本仓是 Go 项目。上游提交 {sha} 是另一种语言的实现（多为 Python），"
+        f"用 `git show {sha}` 看它改了什么。\n"
+        "读懂它修正或新增的行为，在本仓用 Go 实现同样的行为，并接进真实的调用路径。\n"
+        "要求：至少修改一个既有 .go 文件；自己跑 `go build ./...`、`go vet ./...`、"
+        "`go test ./...` 全绿；补一条能钉住该行为的测试。\n"
         "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
         "最后一行输出：改了哪些文件 + 上游行为对应本仓的哪个 文件:函数。"
     )
-    # PI_MODELS 可逗号轮换；不设就用 LLM_MODEL 一个（重试仍会重跑同一模型）
     models = [m.strip() for m in (os.environ.get("PI_MODELS") or model).split(",") if m.strip()] or [model]
     global _pi_deadline
     if _pi_deadline is None:
-        _pi_deadline = time.time() + int(os.environ.get("PI_BUDGET_SEC") or 2700)
-    # 模型这一轮退化成聊天是常态（回「我没有工具」或只出计划），重试才是稳的办法。
+        _pi_deadline = time.time() + int(os.environ.get("PI_BUDGET_SEC") or 5400)
     for i in range(3):
         if time.time() > _pi_deadline:
             say(lines, f"  {sha}: 本轮 PI 时间预算已用完，跳过。")
             return False
         m = models[i % len(models)]
         try:
-            # PI 自带系统提示词 18.5KB + tools 共 22KB，超过上游约 19k 字符上限：
-            # 会触发滚动摘要 → 撞 100s 边缘超时 504 → PI 收不到工具结果只能重试。
-            # 极简提示词把整包压到约 3.3KB（实测）。
-            # 不做上下文裁剪：agnes 有 512K，PI 该怎么用就怎么用（AGENTS.md、skills 都放行）
-            argv = ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci", "--model", m,
-                    "--no-session", "--approve"]
-            # 默认用 PI 自带的系统提示词（原生 tool calling 的端点工具纪律更好）；
-            # PI_TERSE=1 才换极简版——那是给 19k 输入上限的 duck 用的。
-            if os.environ.get("PI_TERSE"):
-                argv += ["--system-prompt", PI_SYSPROMPT]
-            code, out = run(*argv, task, check=False, timeout=900)
+            code, out = run("pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
+                            "--model", m, "--no-session", "--approve", task,
+                            check=False, timeout=1800)
         except subprocess.TimeoutExpired:
-            code, out = 124, "超时（15 分钟）"
-        changed = run("git", "status", "--porcelain", "-uall", check=False)[1].strip()
-        if code == 0 and changed:
+            code, out = 124, "超时（30 分钟）"
+        if code == 0 and run("git", "status", "--porcelain", "-uall", check=False)[1].strip():
             say(lines, f"  {sha}: PI 产出改动（{m}）")
             return True
         tail = " / ".join((out.strip().splitlines() or [""])[-3:])[:400]
@@ -258,8 +192,6 @@ def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt"):
     diff = run("git", "show", "--format=", sha)
     files = run("git", "show", "--name-only", "--format=", sha).split()
     excerpts = []
-    if mode == "port":
-        excerpts = port_excerpts(sha)
     for f in files[:3]:
         fp = os.path.join(ROOT, f)
         if os.path.isfile(fp):
