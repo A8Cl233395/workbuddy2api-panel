@@ -76,6 +76,18 @@ def strip_fence(text):
     return (m.group(1) if m else text).strip() + "\n"
 
 
+def verdict_of(out):
+    """解析模型的四档判定：返回 (verdict, why, patch 正文)。解析不出来按 skip 处理。"""
+    try:
+        d = pick_json(out)
+    except Exception:  # noqa: BLE001
+        return "skip", "回复不是 JSON：" + out[:120].replace("\n", " "), ""
+    v = str(d.get("verdict") or "skip").strip().lower()
+    why = str(d.get("why") or "").strip()
+    body = strip_fence(str(d.get("patch") or "")).strip()
+    return v, why or "（模型未给原因）", (body + "\n") if body else ""
+
+
 def adapt(sha, base, branch, base_url, key, model, lines):
     """让模型把上游提交改写成本仓能用的补丁，提交到 branch。返回是否成功。"""
     run("git", "checkout", "-q", "-B", branch, base)
@@ -90,13 +102,19 @@ def adapt(sha, base, branch, base_url, key, model, lines):
             excerpts.append(f"--- {f} 在本仓不存在（新文件，或本仓实现在别处） ---")
 
     def build(diff_cap, ex_cap):
-        return ("下面是一个上游提交的 diff。请把它**改写成本仓能直接用的补丁**——本仓是长期 fork，"
-                "同一功能往往已有不同实现，原样移植会冲突。只做达成原提交目的所必需的改动，"
-                "保持本仓既有风格与命名。\n\n"
-                "输出要求：只输出一个 ```diff 代码块，内容是 `git apply --3way` 能直接用的 unified "
-                "diff（含 diff --git / --- / +++ / @@ 行）。\n"
-                "无法安全适配时（拿不准、依赖本仓没有的抽象、或目的已由本仓其他代码达成），"
-                "只输出 {\"skip\": true} 和一句原因，不要输出补丁。\n\n"
+        return ("下面是一个上游提交的 diff。本仓是它的长期 fork，同一功能往往已有**另一种实现**，"
+                "所以原样移植必然冲突——这正是要你做的事：判断本仓现状，再只补缺的那部分。\n\n"
+                "输出**一个 JSON 对象**，不要别的话：\n"
+                "{\"verdict\": \"adapt|partial|already_have|skip\",\n"
+                " \"why\": \"一到两句：本仓现状是什么、依据是什么\",\n"
+                " \"patch\": \"unified diff（仅 adapt/partial 时给；否则空串）\"}\n\n"
+                "四档含义：\n"
+                "- adapt：整条都能搬，改写成本仓风格；\n"
+                "- partial：本仓已实现一部分（说清是哪部分），patch **只包含缺口**——这是常态，"
+                "上游常把多个修复塞进一条提交；\n"
+                "- already_have：目的已由本仓其他代码达成，说清在哪个文件/函数；\n"
+                "- skip：依赖本仓没有的抽象，或改动对本仓无意义，说清缺什么。\n"
+                "patch 必须是 `git apply --3way` 能直接用的 unified diff（含 diff --git / --- / +++ / @@）。\n\n"
                 f"===== 上游 diff（{sha}）=====\n{diff[:diff_cap]}\n\n" + "\n\n".join(ex_cap))
 
     # 网关（duck.ai 系）对超长 prompt 直接 400，且不告诉你为什么：先按常规尺寸试，
@@ -110,11 +128,12 @@ def adapt(sha, base, branch, base_url, key, model, lines):
             say(lines, f"  {sha}: 第 {i + 1} 次适配调用失败：{e}")
     if out is None:
         return False
-    if '"skip"' in out[:400]:
-        say(lines, f"  {sha}: 模型判定无法安全适配，跳过。")
+    verdict, why, body = verdict_of(out)
+    say(lines, f"  {sha}: 判定={verdict} — {why}")
+    if verdict in ("skip", "already_have") or not body.strip():
         return False
     with open(PATCH, "w", encoding="utf-8") as f:
-        f.write(strip_fence(out))
+        f.write(body)
     code, msg = run("git", "apply", "--3way", PATCH, check=False)
     if code != 0:
         say(lines, f"  {sha}: 补丁应用失败：\n```\n" + msg[:600] + "\n```")
