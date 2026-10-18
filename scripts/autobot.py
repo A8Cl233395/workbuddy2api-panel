@@ -21,6 +21,7 @@ from datetime import date
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -38,9 +39,9 @@ BOT = ("-c", "user.name=github-actions[bot]",
        "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com")
 
 
-def run(*args, check=True):
+def run(*args, check=True, timeout=None):
     """跑命令。check=False 时返回 (code, 输出)。"""
-    p = subprocess.run(args, cwd=ROOT, capture_output=True, text=True)
+    p = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
     if check and p.returncode != 0:
         raise RuntimeError(f"{' '.join(args)} 失败: {p.stderr.strip()[:400]}")
     return p.stdout.strip() if check else (p.returncode, (p.stdout + p.stderr).strip())
@@ -144,9 +145,80 @@ def port_excerpts(sha, limit=3):
     return ex
 
 
+def finish(sha, lines, mode, mp=""):
+    """落地前的公共闸门：外星文件、孤儿实现、build/vet/test，全绿才提交。"""
+    # 兄弟项目的补丁可能整份搬 Python 进来：go test 照样全绿，但那只是垃圾文件
+    # 用 status 而不是 diff：git apply --3way 会把改动写进 index，diff 看不见；
+    # status 同时覆盖已暂存与未跟踪。已是本仓既有文件的（比如面板 js/html）放行，
+    # 新出现的非 Go 文件一律算外星文件。
+    tracked = set(run("git", "ls-tree", "-r", "--name-only", "HEAD").splitlines())
+    alien = [l[3:] for l in run("git", "status", "--porcelain", "-uall").splitlines()
+             if l[3:] not in tracked and not l[3:].endswith((".go", ".md"))]
+    if alien:
+        run("git", "reset", "-q", "--hard", "HEAD")
+        run("git", "clean", "-qfd")
+        say(lines, f"  {sha}: 补丁引入非 Go 文件 {alien[:5]}，丢弃。")
+        return False, ""
+    if mode == "port":
+        # 只新增、没接线 = 孤儿实现：能编译能过测试，但没有任何行为改变
+        changed = [l[3:] for l in run("git", "status", "--porcelain", "-uall").splitlines()]
+        new_only = [f for f in changed if f not in tracked_files()]
+        if new_only and len(new_only) == len(changed):
+            run("git", "reset", "-q", "--hard", "HEAD")
+            run("git", "clean", "-qfd")
+            say(lines, f"  {sha}: 只新增 {new_only}、没有接线到既有文件，丢弃。")
+            return False, ""
+    # 跨语言重写先过编译与 vet（后面的 go test 是两条路径共用的闸）
+    for cmd in (["go", "build", "./..."], ["go", "vet", "./..."]):
+        if mode == "port":
+            code, msg = run(*cmd, check=False)
+            if code != 0:
+                run("git", "reset", "-q", "--hard", "HEAD")
+                run("git", "clean", "-qfd")
+                say(lines, f"  {sha}: {' '.join(cmd[1:])} 未通过：\n```\n" + msg[-1200:] + "\n```")
+                return False, ""
+    code, msg = run("go", "test", "./...", check=False)
+    if code != 0:
+        run("git", "reset", "-q", "--hard", "HEAD")
+        run("git", "clean", "-qfd")
+        say(lines, f"  {sha}: 适配后测试未通过：\n```\n" + msg[-1200:] + "\n```")
+        return False, ""
+    run("git", "add", "-A")
+    run("git", *BOT, "commit", "-q", "-m", f"autobot: 适配上游 {sha}（LLM 改写，非原样移植）")
+    return True, mp
+
+def pi_port(sha, lines, model):
+    """跨语言移植交给 PI 的 agent 循环：它自己 grep/读/改/跑测试。
+
+    一次性 prompt 的瓶颈是上下文——模型看不到调用链只能回 skip（实测四条全 skip）。
+    """
+    task = (
+        f"本仓是 Go 项目。上游提交 {sha} 是另一种语言（多为 Python）的实现，"
+        f"用 `git show {sha}` 看它改了什么。\n"
+        "任务：读懂它修正或新增的行为，在本仓用 Go 实现同样的行为，并接进真实的调用路径。\n"
+        "必须修改至少一个既有 .go 文件；跑 `go build ./...`、`go vet ./...`、`go test ./...`，"
+        "全绿才算完成；完成后加一条能钉住该行为的测试。\n"
+        "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
+        "最后一行输出：改了哪些文件 + 上游行为对应本仓的哪个 文件:函数。"
+    )
+    try:
+        code, out = run("pi", "-p", "--provider", "ci", "--model", model,
+                        "--no-session", "--approve", task, check=False, timeout=1500)
+    except subprocess.TimeoutExpired:
+        say(lines, f"  {sha}: PI 超时（25 分钟）")
+        return False
+    tail = (out.strip().splitlines() or [""])[-1][:300]
+    say(lines, f"  {sha}: PI 退出码 {code}｜{tail}")
+    return code == 0
+
+
 def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt"):
     """让模型把上游提交改写成本仓能用的补丁，提交到 branch。返回 (是否成功, 行为映射)。"""
     run("git", "checkout", "-q", "-B", branch, base)
+    if mode == "port" and shutil.which("pi"):
+        if not pi_port(sha, lines, model):
+            return False, ""
+        return finish(sha, lines, mode)
     diff = run("git", "show", "--format=", sha)
     files = run("git", "show", "--name-only", "--format=", sha).split()
     excerpts = []
@@ -219,45 +291,7 @@ def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt"):
         if code != 0:
             say(lines, f"  {sha}: 补丁应用失败：\n```\n" + msg[:600] + "\n```")
             return False, ""
-    # 兄弟项目的补丁可能整份搬 Python 进来：go test 照样全绿，但那只是垃圾文件
-    # 用 status 而不是 diff：git apply --3way 会把改动写进 index，diff 看不见；
-    # status 同时覆盖已暂存与未跟踪。已是本仓既有文件的（比如面板 js/html）放行，
-    # 新出现的非 Go 文件一律算外星文件。
-    tracked = set(run("git", "ls-tree", "-r", "--name-only", "HEAD").splitlines())
-    alien = [l[3:] for l in run("git", "status", "--porcelain", "-uall").splitlines()
-             if l[3:] not in tracked and not l[3:].endswith((".go", ".md"))]
-    if alien:
-        run("git", "reset", "-q", "--hard", "HEAD")
-        run("git", "clean", "-qfd")
-        say(lines, f"  {sha}: 补丁引入非 Go 文件 {alien[:5]}，丢弃。")
-        return False, ""
-    if mode == "port":
-        # 只新增、没接线 = 孤儿实现：能编译能过测试，但没有任何行为改变
-        changed = [l[3:] for l in run("git", "status", "--porcelain", "-uall").splitlines()]
-        new_only = [f for f in changed if f not in tracked_files()]
-        if new_only and len(new_only) == len(changed):
-            run("git", "reset", "-q", "--hard", "HEAD")
-            run("git", "clean", "-qfd")
-            say(lines, f"  {sha}: 只新增 {new_only}、没有接线到既有文件，丢弃。")
-            return False, ""
-    # 跨语言重写先过编译与 vet（后面的 go test 是两条路径共用的闸）
-    for cmd in (["go", "build", "./..."], ["go", "vet", "./..."]):
-        if mode == "port":
-            code, msg = run(*cmd, check=False)
-            if code != 0:
-                run("git", "reset", "-q", "--hard", "HEAD")
-                run("git", "clean", "-qfd")
-                say(lines, f"  {sha}: {' '.join(cmd[1:])} 未通过：\n```\n" + msg[-1200:] + "\n```")
-                return False, ""
-    code, msg = run("go", "test", "./...", check=False)
-    if code != 0:
-        run("git", "reset", "-q", "--hard", "HEAD")
-        run("git", "clean", "-qfd")
-        say(lines, f"  {sha}: 适配后测试未通过：\n```\n" + msg[-1200:] + "\n```")
-        return False, ""
-    run("git", "add", "-A")
-    run("git", *BOT, "commit", "-q", "-m", f"autobot: 适配上游 {sha}（LLM 改写，非原样移植）")
-    return True, mp
+    return finish(sha, lines, mode, mp)
 
 
 def main():
