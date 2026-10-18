@@ -65,6 +65,53 @@ func TestArchiveRotationReadAndFilter(t *testing.T) {
 	}
 }
 
+func TestReadArchiveOrdersByEventTimeNotFileMtime(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{Enabled: true, Dir: dir, FileMaxBytes: 1, MaxBytes: 1 << 20, RetentionDays: 7})
+	base := time.Now().Add(-time.Hour)
+	const n = 5
+	for i := 0; i < n; i++ {
+		r.Record(Event{
+			Time:      base.Add(time.Duration(i) * time.Second),
+			RequestID: "ev-" + string(rune('a'+i)),
+			Model:     "glm-5.3",
+			Status:    200,
+			OK:        true,
+			Outcome:   OutcomeSuccess,
+		})
+	}
+	r.Close()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != n {
+		t.Fatalf("archive files = %d, want %d", len(entries), n)
+	}
+	stamp := time.Unix(1700000000, 0)
+	for i, e := range entries {
+		ts := stamp.Add(time.Duration(i) * time.Second)
+		if err := os.Chtimes(filepath.Join(dir, e.Name()), ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rows, err := r.ReadArchive(n, Filter{Model: "glm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != n {
+		t.Fatalf("rows = %d, want %d", len(rows), n)
+	}
+	for i := range rows {
+		want := "ev-" + string(rune('a'+n-1-i))
+		if rows[i].RequestID != want {
+			t.Fatalf("rows[%d] = %s, want %s (ordered by event time, not file mtime)", i, rows[i].RequestID, want)
+		}
+	}
+}
+
 // 来源字段随事件落盘并可被 client_ip / user_agent 过滤（包含匹配、大小写不敏感）。
 func TestArchiveFilterByClientInfo(t *testing.T) {
 	dir := t.TempDir()
