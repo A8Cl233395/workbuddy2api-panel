@@ -12,8 +12,10 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 import yaml
@@ -44,18 +46,32 @@ def pi(task, timeout):
     """跑一次 PI：cwd=本仓，默认系统提示词与上下文，不做裁剪。
 
     429 是免费档的常态（并发一高就打满），退避重试三次再认输。
+
+    shortcut: 用 Popen + 文件重定向而不是 subprocess.run(capture_output)，
+    因为 PI 拉起的工具子进程会继承 stdout 管道：kill 掉 pi 之后管道仍开着，
+    run() 收尾时永远等下去（实测挂到 job 超时 48 分钟都没退）。
     """
     tail = ""
     for attempt in range(3):
-        try:
-            code, out = run("pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
-                            "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
-                            task, check=False, timeout=timeout)
-        except subprocess.TimeoutExpired as e:
-            # 超时也要留下 agent 最后说的话，否则完全看不出卡在哪一步
-            keep = ((e.stdout or "") + (e.stderr or "")).strip().splitlines()[-2:]
-            return 124, ("超时｜" + " / ".join(keep))[:300]
-        tail = " / ".join((out.strip().splitlines() or [""])[-2:])[:300]
+        with tempfile.TemporaryFile("w+") as fh:
+            p = subprocess.Popen(
+                ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
+                 "--model", os.environ["LLM_MODEL"], "--no-session", "--approve", task],
+                cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT, text=True,
+                start_new_session=True)
+            try:
+                p.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)   # 连它拉起的工具子进程一起杀
+                except ProcessLookupError:
+                    pass
+                p.wait(30)
+            fh.seek(0)
+            out = fh.read()
+        code = 124 if (p.returncode is None or p.returncode < 0) else p.returncode
+        keep = (out.strip().splitlines() or [""])[-3:]
+        tail = " / ".join(keep)[:300]
         if code == 0 or "429" not in tail:
             return code, tail
         wait = 60 * (attempt + 1)
@@ -68,11 +84,11 @@ def up_clone(src):
     """上游仓完整 clone 到 /tmp/up/<slug>；已存在就浅拉一次更新。"""
     d = os.path.join(UP_DIR, src.replace("/", "__"))
     if os.path.isdir(os.path.join(d, ".git")):
-        run("git", "-C", d, "fetch", "-q", "--depth", "200", "origin", check=False)
+        run("git", "-C", d, "fetch", "-q", "--depth", "200", "origin", check=False, timeout=600)
         return d
     os.makedirs(UP_DIR, exist_ok=True)
     code, _ = run("git", "clone", "-q", "--depth", "200",
-                  f"https://github.com/{src}.git", d, check=False)
+                  f"https://github.com/{src}.git", d, check=False, timeout=600)
     return d if code == 0 else ""
 
 
