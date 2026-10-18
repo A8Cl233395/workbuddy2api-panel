@@ -36,6 +36,7 @@ FORBIDDEN = {".github/workflows/", "AGENTS.md", "config.example.json"}
 PATCH = "/tmp/autobot.patch"
 # 自动化产出的提交用机器人身份；就近用 -c 传给单条命令，**不写 git config**——
 # 写仓库配置会污染本机手写的提交（2026-10-18 事故：3 个提交变成了 autobot）。
+_pi_deadline = None  # 本轮 PI 时间预算截止（秒），跨候选共享
 BOT = ("-c", "user.name=github-actions[bot]",
        "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com")
 
