@@ -176,8 +176,10 @@ def main():
 
     # CI runner 没有 git 身份：cherry-pick 与适配提交都会死在 "Please tell me who you are"
     # （本地验不出来，因为本地仓库先配过）。仓库级设一次，覆盖两条提交路径。
-    run("git", "config", "user.name", "autobot")
-    run("git", "config", "user.email", "autobot@users.noreply.github.com")
+    # 提交身份用 GitHub Actions 机器人（PR 的 author 仍是 AUTOBOT_TOKEN 的所有者：
+    # 用 GITHUB_TOKEN 开 PR 才显示 bot，但那样的 PR 不会再触发其它 workflow）。
+    run("git", "config", "user.name", "github-actions[bot]")
+    run("git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
 
     cfg = yaml.safe_load(open(os.path.join(ROOT, "AutoBot.yml"), encoding="utf-8"))
     up, pol = cfg["upstream"], cfg["policy"]
