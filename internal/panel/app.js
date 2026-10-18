@@ -626,7 +626,13 @@ function outCell(m, pr) {
 /* rateCell 倍率列：牌价 vs 生效价。上游 credits 是牌价（转正后基准倍率），
    modelPromotions 给当前生效折扣（限时免费 factor=0 / 夜间五折 0.5 等）——
    WorkBuddy 客户端显示的正是生效价。有折扣：生效价大字 + 标签 + 划线牌价，
-   悬停带时段说明；无 factor 只有标签（错峰类）：牌价 + 标签。 */
+   悬停带时段说明；无 factor 只有标签（错峰类）：牌价 + 标签。
+
+   出图模型单独一套口径（两域计费模型不同，见 /panel/api/models 的 credit_source）：
+   - CN hunyuan-image-alpha：目录牌价 x5.00，但实扣每张固定 5.71（牌价低 14%），
+     所以两个数都显示，牌价不被实测覆盖、实测也不被牌价盖住；
+   - global gpt-image-2.5-sunburst：目录不报倍率，按输出图像 token 计费
+     （credit = tokens/7300），单张价随 quality/size 变，故显示实扣 + 档位。 */
 function rateCell(m) {
   const tip = m.promo_note ? ' title="' + esc(m.promo_note) + '"' : '';
   if (m.promo_factor != null && m.promo_credits) {
@@ -638,13 +644,48 @@ function rateCell(m) {
     return '<span' + tip + ' style="cursor:help">' + (m.credits ? esc(m.credits) : '—') +
       ' <span class="tag warn">' + esc(m.promo_label) + '</span></span>';
   }
+  if (m.image_generation) return imageRateCell(m);
   if (!m.credits && m.measured_credit) {
-    // 上游对图片模型不报倍率（目录条目里连 credits 键都没有），用我们账本里的实扣值兜底：
-    // 「实测 0.55/张」是真实计费观测，不是牌价——出处不同，所以加「实测」二字区分。
     return '<span title="上游未报倍率；此值来自本网关的实际扣费记录（credits/张）" style="cursor:help;color:var(--ink-2)">实测 ' +
       esc(m.measured_credit) + '/张</span>';
   }
   return m.credits ? esc(m.credits) : '—';
+}
+
+/* imageRateCell 出图模型倍率格：牌价与实扣并列，档位取自 charge_variants。
+   数据来源：credits = 上游目录牌价；measured_credit = 账本均值（落盘）；
+   charge_last / charge_variants = 上游回执 usage.credit（本次运行，按尺寸×画质分档）。 */
+function imageRateCell(m) {
+  const last = m.charge_last;
+  const per = last && last.credit != null ? last.credit : null;
+  const avg = m.measured_credit;
+  const tier = last ? [last.size, last.quality].filter(Boolean).join(' ') : '';
+  const used = per != null ? per : (avg != null ? Number(avg) : null);
+  if (used == null) {
+    // 还没出过图：有牌价就显示牌价并说明「实扣未知」，没牌价就明说「未观测」。
+    if (m.credits) {
+      return '<span title="上游目录牌价；本网关还没有出图记录，实扣未知" style="cursor:help;color:var(--ink-2)">' +
+        esc(m.credits) + ' <span class="note">牌价</span></span>';
+    }
+    return '<span title="上游目录不报倍率；本网关还没有出图记录，实扣未知" style="cursor:help;color:var(--ink-3)">未观测</span>';
+  }
+  let tip;
+  if (m.credits) {
+    // 有牌价（CN 混元）：说明牌价与实扣的关系，别让运维以为牌价就是账单。
+    tip = '上游目录牌价 ' + m.credits + '；实扣取上游出图回执 usage.credit' +
+      (tier ? '（' + tier + '）' : '') + '。两者不一致时以实扣为准。';
+  } else {
+    // 无牌价（global）：按 token 计费，单张价随画质变——把 token 也报出来便于复核。
+    tip = '上游目录不报倍率；此值为上游出图回执 usage.credit' +
+      (tier ? '（' + tier + '）' : '') +
+      (last && last.output_image_tokens ? '，输出图像 ' + last.output_image_tokens + ' token' : '') +
+      '。该模型按输出图像 token 计费，画质/尺寸不同价不同。';
+  }
+  const shown = Number(used).toFixed(2);
+  const base = m.credits ? ' <s style="color:var(--ink-3);font-size:11.5px">' + esc(m.credits) + '</s>' : '';
+  const tierNote = tier ? '<div class="note">' + esc(tier) + '</div>' : '';
+  return '<span title="' + esc(tip) + '" style="cursor:help;color:var(--ink-1)">实扣 ' +
+    esc(shown) + '/张' + base + tierNote + '</span>';
 }
 
 async function loadModels(force) {

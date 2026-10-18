@@ -121,7 +121,7 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 			continue
 		}
 		lastErr = nil
-		recordImageUsage(h, st, realm, a.UID, bare, modelRate, data, start)
+		recordImageUsage(h, st, realm, a.UID, bare, modelRate, data, req, start)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(data)
 		return
@@ -165,16 +165,25 @@ func imageMode(edit bool) string {
 
 // recordImageUsage 把上游 data 里的用量落到三个既有的账：流水行（st）、成本账本
 // （NoteModelCost）、用量时序（usage.Recorder）。上游 usage 缺失时只记成功、不编数。
-func recordImageUsage(h *Handler, st *chatStat, realm, uid, bare, modelRate string, data []byte, start time.Time) {
+//
+// 额外记一份**分档实扣**（upstream.RecordImageCharge，尺寸×画质）：两域计费模型不同
+// （CN 每张固定 5.71，global 按输出图像 token 计费），混成单一均值会随用户选画质漂移，
+// 面板必须能按档显示。尺寸/画质优先取上游回执（global 会回 size/quality），回执缺省
+// 时回落请求体同名字段（CN 回执不带，但请求里带了）。
+func recordImageUsage(h *Handler, st *chatStat, realm, uid, bare, modelRate string, data []byte, req map[string]any, start time.Time) {
 	st.status = http.StatusOK
 	st.outcome = "success"
 	var env struct {
-		Usage struct {
-			InputTokens  int64   `json:"input_tokens"`
-			OutputTokens int64   `json:"output_tokens"`
-			TotalTokens  int64   `json:"total_tokens"`
-			Credit       float64 `json:"credit"`
-			ImageCounts  int64   `json:"output_image_counts"`
+		Quality string `json:"quality"`
+		Size    string `json:"size"`
+		Usage   struct {
+			InputTokens   int64   `json:"input_tokens"`
+			OutputTokens  int64   `json:"output_tokens"`
+			TotalTokens   int64   `json:"total_tokens"`
+			Credit        float64 `json:"credit"`
+			ImageCounts   int64   `json:"output_image_counts"`
+			ImageTokens   int64   `json:"output_image_tokens"`
+			Coefficient   float64 `json:"output_image_coefficient"`
 		} `json:"usage"`
 	}
 	_ = json.Unmarshal(data, &env) // 上游省略 usage 时零值：下面按「有没有真值」决定是否记账
@@ -186,6 +195,17 @@ func recordImageUsage(h *Handler, st *chatStat, realm, uid, bare, modelRate stri
 	if u.Credit > 0 {
 		st.credit, st.hasCredit = u.Credit, true
 		h.cfg.Pool.NoteModelCost(uid, bare, u.Credit, int(u.TotalTokens))
+		if h.cfg.Upstream != nil {
+			size := env.Size
+			if size == "" {
+				size, _ = req["size"].(string)
+			}
+			quality := env.Quality
+			if quality == "" {
+				quality, _ = req["quality"].(string)
+			}
+			h.cfg.Upstream.RecordImageCharge(realm, bare, size, quality, u.Credit, u.ImageTokens)
+		}
 	}
 	imgs := u.ImageCounts
 	if imgs == 0 {

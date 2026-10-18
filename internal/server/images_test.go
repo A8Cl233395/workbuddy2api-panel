@@ -195,6 +195,69 @@ func TestImagesRecordedInPanel(t *testing.T) {
 	}
 }
 
+// TestImagesChargeRecordedPerTier 出图实扣按「尺寸×画质」分档落观测（面板倍率列据此
+// 显示「实扣 x/张 + 档位」）。
+//
+// 两种回执形状都要覆盖：global 回 size/quality（直接采信）；CN 不回（回落请求体）。
+// 混档会让 0.55 与 4.84 混成一个假均值——这正是本次修复的靶子。
+func TestImagesChargeRecordedPerTier(t *testing.T) {
+	cases := []struct {
+		name  string
+		model string
+		body  string
+		resp  string
+		want  upstream.ImageChargeAgg
+	}{
+		{
+			name:  "global 回执自带 size/quality（high 档 4.84）",
+			model: "global:gpt-image-2.5-sunburst",
+			body:  `{"model":"global:gpt-image-2.5-sunburst","prompt":"a cat","size":"512x512"}`,
+			resp: `{"code":0,"data":{"created":1,"size":"1024x1024","quality":"high",` +
+				`"data":[{"b64_json":"AAA"}],"usage":{"output_image_tokens":35333,"output_image_counts":1,"credit":4.84}}}`,
+			want: upstream.ImageChargeAgg{Size: "1024x1024", Quality: "high", Last: 4.84, LastTokens: 35333},
+		},
+		{
+			name:  "CN 回执不带 size（回落请求体，每张固定 5.71）",
+			model: "cn:hunyuan-image-alpha",
+			body:  `{"model":"cn:hunyuan-image-alpha","prompt":"a cat","size":"512x512"}`,
+			resp: `{"code":0,"data":{"created":1,"data":[{"url":"https://cos/x.png"}],` +
+				`"usage":{"input_tokens":334,"output_tokens":1118,"total_tokens":1452,"output_image_counts":1,"credit":5.71}}}`,
+			want: upstream.ImageChargeAgg{Size: "512x512", Quality: "", Last: 5.71, LastTokens: 0},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &imageFake{status: 200, body: c.resp}
+			up := f.client()
+			h := NewHandler(Config{Pool: imagePool(), Upstream: up})
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(c.body))
+			h.ServeHTTP(rec, req)
+			if rec.Code != 200 {
+				t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+			}
+			realm, bare := "global", "gpt-image-2.5-sunburst"
+			if strings.HasPrefix(c.model, "cn:") {
+				realm, bare = "cn", "hunyuan-image-alpha"
+			}
+			got := up.ImageCharges(realm, bare)
+			if len(got) != 1 {
+				t.Fatalf("应记 1 档，实际 %+v", got)
+			}
+			g := got[0]
+			if g.Size != c.want.Size || g.Quality != c.want.Quality {
+				t.Errorf("档位 size/quality=%q/%q want %q/%q", g.Size, g.Quality, c.want.Size, c.want.Quality)
+			}
+			if g.Last != c.want.Last || g.LastTokens != c.want.LastTokens {
+				t.Errorf("实扣 last/tokens=%v/%d want %v/%d", g.Last, g.LastTokens, c.want.Last, c.want.LastTokens)
+			}
+			if g.Samples != 1 {
+				t.Errorf("samples=%d want 1", g.Samples)
+			}
+		})
+	}
+}
+
 // TestImagesEdits 图生图：JSON（data URL）与 multipart（OpenAI SDK 形态）都要能转成
 // 上游要的 JSON——image 数组、其余字段透传。
 func TestImagesEdits(t *testing.T) {

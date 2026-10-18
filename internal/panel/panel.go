@@ -13,6 +13,7 @@ package panel
 import (
 	"encoding/json"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -474,12 +475,17 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	// 「模型与档位」也必须看得到——否则用户不知道有哪些能调。字段与对话模型同口径，
 	// 另加 image_generation 标记（前端据此标「出图」）。视频不列：没有网关端点。
 	//
-	// 倍率：上游对图片模型**不报**倍率（全字段实测：v3 目录里 gpt-image-2.5-sunburst
-	// 只有 id/name/tags，连 credits 键都没有；企业端点不列媒体模型），所以空倍率那一格
-	// 用**我们自己账本里的实扣值**兜底（credit_by_model 的 credits/credit_samples）。
-	// 实测 0.55 credit/张 vs 国内混元目录牌价 x5.00 —— 两个数都不是编的，来源不同故分列：
-	// credits 是牌价，measured_credit 是实测单价（前端加「实测」字样）。
-	// 账本行键是「域:模型」，故这里按 realm+":"+模型 id 查（跨域同名模型本就该各算各的）。
+	// 倍率口径（2026-10-18 复测，两域计费模型不同）：
+	//   - 牌价 `credits` 只部分模型有：CN hunyuan-image-alpha 报 x5.00，**但实扣是每张
+	//     固定 5.71**（牌价低 14%，不能拿牌价当实付）；
+	//   - global gpt-image-2.5-sunburst 目录里连 credits 键都没有，因为它是**按输出
+	//     图像 token 计费**（credit = tokens/7300），单张价格随 quality/size 变（1024²
+	//     low 0.55 / high 4.84）。
+	// 故这里三个字段并列输出，前端各按语义展示，绝不用均值覆盖牌价：
+	//   credits         上游目录牌价（可能没有）
+	//   measured_credit 账本里该模型的平均实扣（落盘口径，跨重启）
+	//   charge_variants 本次运行按「尺寸×画质」分档的实扣（含最近一次与图像 token），
+	//                   无样本时省略——它是判断「这价是哪一档」的唯一依据。
 	measured := map[string]string{}
 	if p.cfg.Usage != nil {
 		for _, c := range p.cfg.Usage.Snapshot(0, nil).CreditByModel {
@@ -498,10 +504,31 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 			}
 			e := panelModelEntry(realm, mi, nil, "", p.cfg.Upstream.HTTP)
 			e["image_generation"] = true
-			if e["credits"] == "" {
-				if v, ok := measured[realm+":"+mi.ID]; ok {
-					e["measured_credit"] = v
+			// 有牌价也照样带实测（此前只在 credits 为空时才带，导致 CN 的 5.71 被
+			// x5.00 盖住、用户看到的价格比实付低）。
+			if v, ok := measured[realm+":"+mi.ID]; ok {
+				e["measured_credit"] = v
+			}
+			if variants := p.cfg.Upstream.ImageCharges(realm, mi.ID); len(variants) > 0 {
+				e["charge_variants"] = variants
+				last := variants[0]
+				for _, v := range variants {
+					if v.LastAt > last.LastAt {
+						last = v
+					}
 				}
+				e["charge_last"] = map[string]any{
+					"credit":              math.Round(last.Last*100) / 100,
+					"size":                last.Size,
+					"quality":             last.Quality,
+					"output_image_tokens": last.LastTokens,
+					"at":                  last.LastAt,
+				}
+			}
+			if _, hasCatalog := e["credits"]; hasCatalog && e["credits"] != "" {
+				e["credit_source"] = "catalog+usage_receipt"
+			} else {
+				e["credit_source"] = "usage_receipt"
 			}
 			out = append(out, e)
 		}

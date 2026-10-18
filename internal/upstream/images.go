@@ -7,14 +7,22 @@
 // {created,data:[{url}],usage{...,credit}}，图是签名 COS 直链（约 24h 有效）——网关只拆
 // 信封，不转存字节。edits 多一个 image（data URL 数组）。
 //
-// 模型名按 realm 不同：cn = hunyuan-image-alpha（≈5.7 credit/张，与尺寸无关）；
-// global = gpt-image-2.5-sunburst（混元在国际版无路由，回 14401 route config not found）。
+// 模型名按 realm 不同，**计费模型也完全不同**（2026-10-18 复测）：
+//
+//	cn     hunyuan-image-alpha   每张固定 5.71 credit。512/1024/1536 三档尺寸、n=1/2
+//	                             四次回执全为 5.71（output_tokens 却在 693–1118 间跳），
+//	                             说明与尺寸/token/张数都无关；目录牌价是 x5.00，比实扣
+//	                             低 14%（牌价不等于实扣，面板两个都要显示）。
+//	global gpt-image-2.5-sunburst 按**输出图像 token** 计费：credit = tokens / 7300
+//	                             （1024² low: 0.55 / 3997 tokens；1024² high: 4.84 / 35333）。
+//	                             目录里不报 credits，故没有"每张一个价"可言。
 package upstream
 
 import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -34,6 +42,100 @@ func (c *Client) ImageGenerations(a *auth.Auth, body any) (json.RawMessage, erro
 // ImageEdits 图生图（image 为 data URL 数组），同样返回 OpenAI 形状的 data。
 func (c *Client) ImageEdits(a *auth.Auth, body any) (json.RawMessage, error) {
 	return c.growthJSON(a, http.MethodPost, editsPath, body)
+}
+
+// ImageChargeAgg 出图实扣按「尺寸 × 画质」分档的聚合（见 RecordImageCharge）。
+//
+// 为什么需要分档：两个域的计费模型完全不同，混成一个均值会骗人——
+//
+//	global gpt-image-2.5-sunburst：按**输出图像 token** 计费（实测 credit = tokens/7300：
+//	  1024² low = 0.55 / 3997 tokens，1024² high = 4.84 / 35333 tokens，差 8.8 倍）；
+//	cn hunyuan-image-alpha：**每张固定 5.71**，与尺寸/画质/n 全无关（4 次复测恒等）。
+//
+// 所以面板必须知道某个均值是「哪一档」的平均，否则 0.55 一旦参进 high 样本就再也
+// 对不上任何一档真实价格。
+type ImageChargeAgg struct {
+	Realm   string `json:"realm"`
+	Model   string `json:"model"`
+	Size    string `json:"size,omitempty"`
+	Quality string `json:"quality,omitempty"`
+	// Samples 该档累计次数；Credits 累计实扣；Avg 平均每张。
+	Samples int     `json:"samples"`
+	Credits float64 `json:"credits"`
+	Avg     float64 `json:"avg"`
+	// Last 最近一次的实扣与输出图像 token（global 侧据 token 反推单价用）。
+	Last        float64 `json:"last"`
+	LastTokens  int64   `json:"last_output_image_tokens,omitempty"`
+	LastAt      string  `json:"last_at,omitempty"`
+}
+
+// imageChargeKey 分档键：域:模型@尺寸/画质（缺项记 "-"，保证桶不串）。
+func imageChargeKey(realm, model, size, quality string) string {
+	if size == "" {
+		size = "-"
+	}
+	if quality == "" {
+		quality = "-"
+	}
+	return realm + ":" + model + "@" + size + "/" + quality
+}
+
+// RecordImageCharge 记录一次出图实扣（数量取上游回执 usage.credit）。
+// tokens 为 usage.output_image_tokens（CN 侧不回该字段，记 0）。
+// 只在 credit > 0 时调用（上游省略 usage 时不编数）。
+func (c *Client) RecordImageCharge(realm, model, size, quality string, credit float64, tokens int64) {
+	if c == nil || model == "" || credit <= 0 {
+		return
+	}
+	key := imageChargeKey(realm, model, size, quality)
+	c.imageChargeMu.Lock()
+	defer c.imageChargeMu.Unlock()
+	if c.imageCharges == nil {
+		c.imageCharges = make(map[string]ImageChargeAgg)
+	}
+	agg := c.imageCharges[key]
+	agg.Realm, agg.Model = realm, model
+	if size != "" {
+		agg.Size = size
+	}
+	if quality != "" {
+		agg.Quality = quality
+	}
+	agg.Samples++
+	agg.Credits += credit
+	agg.Avg = agg.Credits / float64(agg.Samples)
+	agg.Last = credit
+	if tokens > 0 {
+		agg.LastTokens = tokens
+	}
+	agg.LastAt = time.Now().Format(time.RFC3339)
+	c.imageCharges[key] = agg
+}
+
+// ImageCharges 返回某域某模型的全部分档（样本多的在前）。空结果 = 本次运行还没出过图。
+//
+// 内存态、重启清零：它是「最近实扣观测」，不是账单；长期口径仍由 usage.Recorder
+// （credit_by_model，落盘）负责。刻意不并入 Recorder——那边的桶按 日/小时 分，
+// 再加一维尺寸×画质会让整条落盘链路（含旧文件兼容）复杂化，收益不成正比。
+func (c *Client) ImageCharges(realm, model string) []ImageChargeAgg {
+	if c == nil {
+		return nil
+	}
+	c.imageChargeMu.Lock()
+	defer c.imageChargeMu.Unlock()
+	out := make([]ImageChargeAgg, 0, 4)
+	for _, agg := range c.imageCharges {
+		if agg.Realm == realm && agg.Model == model {
+			out = append(out, agg)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Samples != out[j].Samples {
+			return out[i].Samples > out[j].Samples
+		}
+		return out[i].Avg > out[j].Avg
+	})
+	return out
 }
 
 // stashGenerationModels 从一次目录解析里留存媒体生成模型（在 nonChatModel 过滤**前**

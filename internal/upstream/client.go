@@ -710,6 +710,11 @@ type Client struct {
 	imageMu     sync.Mutex
 	imageModels map[string][]ModelInfo
 
+	// imageChargeMu/imageCharges 出图实扣分档观测（见 images.go 的 ImageChargeAgg）：
+	// 键 = 域:模型@尺寸/画质，值 = 该档的样本数/累计/最近一次。内存态，重启清零。
+	imageChargeMu sync.Mutex
+	imageCharges  map[string]ImageChargeAgg
+
 	// ChatHTTP 聊天 SSE 专用 client：无总时长上限（Timeout=0），首字节由
 	// Transport.ResponseHeaderTimeout 约束，流中空闲由 IdleTimeout 约束。
 	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
