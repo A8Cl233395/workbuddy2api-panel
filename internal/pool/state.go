@@ -761,6 +761,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Priority:             p.priorityOf(uid),
 		Share:                p.shareOf(uid),
 		Cooling:              now.Before(e.until) || now.Before(e.breakerUntil),
+		SessionDeadFails:     e.sessionDeadFails,
 		Disabled:             e.disabled,
 		Paused:               e.paused,
 		SuccessCount:         e.successCount,

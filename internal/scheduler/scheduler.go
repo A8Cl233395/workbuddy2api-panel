@@ -89,6 +89,12 @@ type Scheduler struct {
 	balanceInterval atomic.Int64
 	sweepInterval   atomic.Int64
 
+	// authHealMu/authHealAt 401→refresh 求证的退避记账（uid → 上次求证成功时刻）。
+	// 降级 token（billing 恒 401、chat 仍可用）会让每轮探测都 401，不设退避就是每
+	// 5 分钟轮换一次 RT——换不来可用凭据，只放大上游风控与并发竞态。
+	authHealMu sync.Mutex
+	authHealAt map[string]time.Time
+
 	// lastBalanceRefresh 最近一次后台余额刷新的完成时刻（Unix 纳秒，0=尚未跑过）。
 	// 供面板「到期提醒」标注数据年龄：卡片展示的是这份快照，必须让年龄可读，
 	// 否则界面 5 秒轮询会让人误以为数据也是 5 秒级新鲜。
@@ -769,6 +775,7 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
 			if err != nil {
 				log.Printf("WARN: balance %s: %v", logfmt.Label(uid, a.Nickname), err)
+				s.noteBalanceAuthFailure(a, uid, err)
 				return
 			}
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)

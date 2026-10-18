@@ -84,6 +84,10 @@ type Status struct {
 	// ReserveBlocked 是否因「保留积分」停牌（余额已知且 <= 阈值）：账号仍在池中、
 	// 照常跑定时任务，只是不接单。阈值 0 / 余额未知 → false。
 	ReserveBlocked bool `json:"reserve_blocked,omitempty"`
+	// SessionDeadFails 连续 12153（ErrSessionDead）计数，即「离禁用还差几次」的进度。
+	// 此前只落 state.json 不透出：上游批量注销会话后号已不可用，面板仍显示「可用」，
+	// 要等每日保活连败满阈（≈3 天）才转 disabled（issue #215 复盘）。
+	SessionDeadFails int `json:"session_dead_fails"`
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中
 	// 的到期压力。CreditsExpiring 是配置窗口内的剩余积分；后两者是全部未来到期批次中
 	// 最早的一批及其剩余量，供 WorkDaddy 同口径的“最早到期优先”路由使用。

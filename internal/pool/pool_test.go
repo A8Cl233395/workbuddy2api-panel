@@ -2258,3 +2258,27 @@ func TestExpiryBucketsFEFOAndPersistence(t *testing.T) {
 		t.Fatalf("重启后最早批次=%v/%d want %v/80", st2.CreditsEarliestExpiry, st2.CreditsEarliestRemaining, at10)
 	}
 }
+
+// TestStatusExposesSessionDeadFails 面板靠这个字段把「已被上游判死、还没到禁用阈值」的
+// 中间态打出来（否则上游批量注销会话后，号在 billing/chat 双侧 401，面板仍显示「可用」，
+// 直到每日保活连败满阈 ≈3 天才变灰，issue #215 复盘）。这里钉住 Status 的透出与 JSON 名。
+func TestStatusExposesSessionDeadFails(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.NoteSessionDead("u1")
+	st, ok := p.Status("u1")
+	if !ok || st.SessionDeadFails != 1 {
+		t.Fatalf("SessionDeadFails=%d want 1", st.SessionDeadFails)
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := wire["session_dead_fails"]; !ok || v.(float64) != 1 {
+		t.Fatalf("JSON 字段 session_dead_fails 缺失或值不对: %s", b)
+	}
+}

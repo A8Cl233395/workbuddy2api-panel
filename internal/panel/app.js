@@ -415,6 +415,9 @@ function renderAccounts(list) {
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     }
     else if (s.reserve_blocked) { cls = 'cool'; tag = '<span class="tag warn">保留积分</span>'; }
+    // 会话疑似失效（12153 连续计数已 >0、还没到禁用阈值）：上游已判死、号还留在池里。
+    // 此前这种中间态完全不可见，面板照样打「可用」（issue #215 复盘）。
+    else if (s.session_dead_fails > 0) { cls = 'cool'; tag = '<span class="tag warn">疑似登录失效 · 待重登</span>'; }
     else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
