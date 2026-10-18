@@ -1,6 +1,6 @@
 name: autobot
 
-# 每日挑一条上游改动 → 开分支 → 跑测试 → 提 PR 给人审。
+# 每日挑一条上游改动 → 适配到本仓 → 跑测试 → 提 PR 给人审。
 # 声明与禁项在仓库根的 AutoBot.yml；这里只做执行。
 # 注意：用 AUTOBOT_TOKEN（PAT）而不是默认 GITHUB_TOKEN——后者触发的 push/PR
 # 不会再触发其它 workflow，PR 上就不会有 binaries 的 test 与四平台构建。
@@ -9,6 +9,10 @@ on:
   schedule:
     - cron: "30 1 * * *" # UTC 01:30 = 上海 09:30
   workflow_dispatch:
+    inputs:
+      repo:
+        description: "临时看别的仓库（owner/name），留空则用 AutoBot.yml 里的上游"
+        required: false
 
 permissions:
   contents: write
@@ -33,20 +37,20 @@ jobs:
       # PyYAML 在 ubuntu-latest 上不保证预装，装一次比写个手解析器便宜。
       - run: python3 -m pip install --quiet pyyaml
 
-      - name: 配置上游 remote
-        run: |
-          UP=$(python3 -c "import yaml;print(yaml.safe_load(open('AutoBot.yml'))['upstream']['repo'])")
-          git remote add upstream "https://github.com/$UP.git"
-          git fetch -q upstream
-
-      - name: 挑选与提 PR
+      - name: 挑选、适配与提 PR
         env:
           GH_TOKEN: ${{ secrets.AUTOBOT_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
-        run: python3 scripts/autobot.py
+          SRC: ${{ inputs.repo }}
+        run: |
+          if [ -n "$SRC" ]; then
+            python3 scripts/autobot.py --repo "$SRC"
+          else
+            python3 scripts/autobot.py
+          fi
 
       - name: 报告进 job summary
         if: always()
