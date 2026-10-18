@@ -120,7 +120,10 @@ def adapt(sha, base, branch, base_url, key, model, lines):
     # 网关（duck.ai 系）对超长 prompt 直接 400，且不告诉你为什么：先按常规尺寸试，
     # 失败了就砍到只剩 diff 再来一次。两次都失败才放弃这条候选。
     out = None
-    for i, (cap, ex) in enumerate(((30000, excerpts), (6000, []))):
+    # 降采样时不能把节选全砍掉：没有本仓上下文，模型只能回「无法判断哪些已有替代实现」
+    # （真实日志就是这么 skip 的）。留一份 800 字的最小节选，够它认「这条已经做过了」。
+    tiny = [e[:800] for e in excerpts[:1]]
+    for i, (cap, ex) in enumerate(((30000, excerpts), (6000, tiny))):
         try:
             out = llm(base_url, key, model, build(cap, ex))
             break
