@@ -35,6 +35,9 @@ FORBIDDEN = {".github/workflows/", "AGENTS.md", "config.example.json"}
 PATCH = "/tmp/autobot.patch"
 # 自动化产出的提交用机器人身份；就近用 -c 传给单条命令，**不写 git config**——
 # 写仓库配置会污染本机手写的提交（2026-10-18 事故：3 个提交变成了 autobot）。
+# 极简系统提示词：默认那份 18.5KB 会顶穿上游输入上限（见 pi_port）
+PI_SYSPROMPT = ("你是编码助手。用 read/bash/edit/write 工具直接改代码，不要询问许可、"
+                "不要只给计划；改完必须自己跑 go build/vet/test。")
 BOT = ("-c", "user.name=github-actions[bot]",
        "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com")
 
@@ -184,6 +187,10 @@ def finish(sha, lines, mode, mp=""):
         say(lines, f"  {sha}: 适配后测试未通过：\n```\n" + msg[-1200:] + "\n```")
         return False, ""
     run("git", "add", "-A")
+    # 无改动时 commit 的失败信息走 stdout、stderr 为空，check=True 抛出的异常会把整轮跑挂
+    if run("git", "diff", "--cached", "--quiet", check=False)[0] == 0:
+        say(lines, f"  {sha}: 全部闸门通过但没有任何改动，跳过。")
+        return False, ""
     run("git", *BOT, "commit", "-q", "-m", f"autobot: 适配上游 {sha}（LLM 改写，非原样移植）")
     return True, mp
 
@@ -193,21 +200,27 @@ def pi_port(sha, lines, model):
     一次性 prompt 的瓶颈是上下文——模型看不到调用链只能回 skip（实测四条全 skip）。
     """
     task = (
-        f"本仓是 Go 项目。上游提交 {sha} 是另一种语言（多为 Python）的实现，"
-        f"用 `git show {sha}` 看它改了什么。\n"
+        f"第一步：立刻调用 bash 执行 `git show --stat {sha}` 与 `git show {sha}`，不要先解释。"
+        f"本仓是 Go 项目，上游提交 {sha} 是另一种语言（多为 Python）的实现。\n"
         "任务：读懂它修正或新增的行为，在本仓用 Go 实现同样的行为，并接进真实的调用路径。\n"
         "必须修改至少一个既有 .go 文件；跑 `go build ./...`、`go vet ./...`、`go test ./...`，"
         "全绿才算完成；完成后加一条能钉住该行为的测试。\n"
+        "你已拥有 read/bash/edit/write 工具：直接调用，不要询问许可、不要只给计划等确认。\n"
         "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
         "最后一行输出：改了哪些文件 + 上游行为对应本仓的哪个 文件:函数。"
     )
     try:
+        # PI 自带系统提示词有 18.5KB，加上 tools 共 22KB，超过上游约 19k 字符上限：
+        # 网关会触发滚动摘要 → 撞 100s 边缘超时返回 504 → PI 拿不到工具结果无限重试。
+        # 换极简系统提示词后整包约 3.3KB，同一任务一次就收口（实测）。
         code, out = run("pi", "-p", "--provider", "ci", "--model", model,
-                        "--no-session", "--approve", task, check=False, timeout=1500)
+                        "--no-session", "--approve", "--no-context-files", "--no-skills",
+                        "--system-prompt", PI_SYSPROMPT,
+                        task, check=False, timeout=1500)
     except subprocess.TimeoutExpired:
         say(lines, f"  {sha}: PI 超时（25 分钟）")
         return False
-    tail = (out.strip().splitlines() or [""])[-1][:300]
+    tail = " / ".join((out.strip().splitlines() or [""])[-3:])[:600]
     say(lines, f"  {sha}: PI 退出码 {code}｜{tail}")
     return code == 0
 
