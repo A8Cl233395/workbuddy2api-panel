@@ -1,0 +1,33 @@
+# AutoBot.yml —— 上游吸收的声明式配置。
+#
+# 本文件只是契约：谁来读它见 .github/workflows/autobot.yml（schedule + workflow_dispatch）。
+# 改行为只改这里，不用改代码。
+
+version: 1
+
+upstream:
+  repo: linguo2625469/workbuddy2api-panel
+  remote: upstream          # 只在 CI 里临时添加，不写进本地 remote
+  lookback_days: 7          # 只看最近 N 天的提交；不做状态文件，靠分支名去重
+
+policy:
+  base: main
+  branch_prefix: autobot/
+  label: autobot
+  max_prs_per_run: 1        # 一次最多开一个 PR：宁可少，不可轰炸
+  # 允许改测试：不允许的话「有没有回归」就无法证明。
+  allow_test_changes: true
+  # LLM 的职责边界：只做「挑哪条」，不写代码。代码由 git cherry-pick 搬，
+  # 由 go test 判定能不能留——让模型凭空生成 Go 补丁的成功率不够，且无法验证。
+  mode: cherry-pick
+
+  # 硬禁项。这是给执行者划的线，不是提示词里的软约束：
+  never:
+    - push_main
+    - merge
+    - tag
+    - release
+    - deploy
+    - .github/workflows/**
+    - AGENTS.md
+    - config.example.json
