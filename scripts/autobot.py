@@ -236,8 +236,14 @@ def main():
     if args.phase in ("analyze", "all"):
         todo = shard(repos, args.shard)
         say(lines, f"分析 {len(todo)} 个仓库（共 {len(repos)}，分片 {args.shard or '全部'}）")
+        made = 0
         for src in todo:
-            analyze(src, lines)
+            made += 1 if analyze(src, lines) else 0
+        if todo and not made:
+            # 一个报告都没产出（典型原因：模型额度 429）必须让 job 红，别假装成功
+            say(lines, "本片没有产出任何报告")
+            write_report(lines)
+            return 1
 
     if args.phase in ("implement", "all"):
         reports = []
