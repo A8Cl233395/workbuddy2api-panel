@@ -657,3 +657,75 @@ func TestClampGPTMinMaxTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitRealmPrefix(t *testing.T) {
+	cases := []struct {
+		in, realm, bare string
+	}{
+		{"cn:hy3", "cn", "hy3"},
+		{"global:gpt-x", "global", "gpt-x"},
+		{"hy3", "cn", "hy3"},
+		{"weird:model", "cn", "weird:model"},
+		{"cn:", "cn", ""},
+		{":", "cn", ":"},
+		{"", "cn", ""},
+	}
+	for _, c := range cases {
+		realm, bare := SplitRealmPrefix(c.in)
+		if realm != c.realm || bare != c.bare {
+			t.Errorf("SplitRealmPrefix(%q) = (%q,%q), want (%q,%q)", c.in, realm, bare, c.realm, c.bare)
+		}
+	}
+}
+
+func TestPrepareBodyStripsRealmPrefix(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"cn prefix", `{"model":"cn:hy3","messages":[]}`, "hy3"},
+		{"global prefix", `{"model":"global:gpt-x","messages":[]}`, "gpt-x"},
+		{"bare name", `{"model":"hy3","messages":[]}`, "hy3"},
+		{"unknown prefix", `{"model":"weird:model","messages":[]}`, "weird:model"},
+		{"missing model", `{"messages":[]}`, ""},
+		{"non-string model", `{"model":123,"messages":[]}`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := PrepareBodyOpt([]byte(c.body), false)
+			var obj map[string]any
+			if err := json.Unmarshal(out, &obj); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, _ := obj["model"].(string)
+			if got != c.want {
+				t.Fatalf("model = %q, want %q (body=%s)", got, c.want, out)
+			}
+		})
+	}
+}
+
+// 归一化必须发生在 catalog/efforts 查表之前：带前缀的 model 也要命中裸名条目。
+func TestPrepareBodyPrefixedModelUsesBareForCatalogAndEffort(t *testing.T) {
+	body := []byte(`{"model":"cn:hy3","reasoning_effort":"max","messages":[]}`)
+	out, effort := PrepareBodyOptWithEffortsDefaultAndCaps(body, false,
+		map[string][]string{"hy3": {"low", "high"}},
+		map[string]string{"hy3": "high"},
+		map[string]int64{"hy3": 123},
+	)
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if obj["model"] != "hy3" {
+		t.Fatalf("model = %v, want hy3", obj["model"])
+	}
+	if obj["max_tokens"] != float64(123) {
+		t.Fatalf("max_tokens = %v, want 123 (catalog lookup used prefixed model?)", obj["max_tokens"])
+	}
+	if obj["reasoning_effort"] != "high" {
+		t.Fatalf("reasoning_effort = %v, want high (efforts lookup used prefixed model?)", obj["reasoning_effort"])
+	}
+	if effort != "high" {
+		t.Fatalf("effort = %q, want high", effort)
+	}
+}

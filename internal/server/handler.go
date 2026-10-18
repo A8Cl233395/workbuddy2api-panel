@@ -804,11 +804,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		degradedApplied = true
 	}
 
-	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，
-	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
-	if bareModel != peek.Model {
-		body = rewriteModel(body, bareModel)
-	}
+	// outbound model 名由 upstream.prepareBody 在同一次 JSON 解析里剥成裸名
+	// （realm 前缀是网关侧路由协议，上游不认前缀）。这里不再提前做整段
+	// parse+marshal，body 保留客户端原始模型名供日志/续写帧使用。
 
 	// 会话头族（issue #35）：后台按 X-Conversation-Request-ID（对话轮级）聚合请求，
 	// 官方客户端一次 user send 内所有 tool call/重试/换号复用同一个 ID。此处**轮转

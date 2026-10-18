@@ -318,27 +318,6 @@ func (s *chatStatsReader) Read(p []byte) (int, error) {
 	return 0, err
 }
 
-// rewriteModel 把 outbound chat body 的 model 字段替换为 bare（保留其余字段原样）。
-// 仅当 bare != 原 model 时由 chatCompletions 调用；body 不可解析时原样返回（不二次错误化）。
-func rewriteModel(body []byte, bare string) []byte {
-	if len(body) == 0 || bare == "" {
-		return body
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return body
-	}
-	if cur, ok := obj["model"].(string); !ok || cur == bare {
-		return body
-	}
-	obj["model"] = bare
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
 // usageDeltaFromResponse 从非流式聚合响应中提取明确存在的 token 字段。
 func usageDeltaFromResponse(resp map[string]any) pool.TokenUsageDelta {
 	delta := pool.TokenUsageDelta{}
