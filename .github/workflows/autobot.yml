@@ -49,8 +49,8 @@ jobs:
     # 66 个仓一个 job 串行跑不完，按片并行；每片自己 clone、自己分析、自己上传报告
     strategy:
       fail-fast: false
-      # 免费档速率限制很紧：实测 17 片并发第一分钟就 429
-      max-parallel: 2
+      # 换了自己的网关后并发能开到 6；单仓分析压线 25 分钟，66 仓约 5 小时
+      max-parallel: 6
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
