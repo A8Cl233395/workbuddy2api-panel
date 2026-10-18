@@ -79,6 +79,12 @@ def main():
               "--no-merges", "--format=%h%x09%ad%x09%s", "--date=short", up["remote"] + "/main")
     cands = [l.split("\t", 2) for l in log.splitlines()
              if l.strip() and not re.match(r"\s*chore", l.split("\t", 2)[2])]
+    # 预筛掉「内容上已有等价改动」的提交：git cherry 用 patch-id 比对，标 - 的就是
+    # 本仓已经吸收过的。没有这层，模型会把我们早就实现过的修复当成候选（实测第一次
+    # 真跑就挑了 535e19e —— 我们早已有 nameBadIDs，cherry-pick 直接冲突）。
+    applied = {l[2:9] for l in run("git", "cherry", "-v", "HEAD",
+                                   up["remote"] + "/main").splitlines() if l.startswith("- ")}
+    cands = [c for c in cands if c[0] not in applied]
     if not cands:
         say(lines, "最近没有新的上游提交。")
         write_report(lines)
@@ -101,9 +107,9 @@ def main():
     prompt = (
         "你在给一个 fork 挑选值得吸收的上游提交。本仓是 workbuddy2api-panel 的长期 fork，"
         "已有大量自有实现（缓存键、补偿、检索、签到、面板、调度都有改动）。\n"
-        "从下面候选中挑**最多一条**最值得吸收的：优先真 bug 修复、且改动小、且不太可能与"
-        "本仓已有实现冲突。输出 JSON：{\"sha\":\"...\",\"why\":\"一句话\","
-        "\"risk\":\"一句话\",\"confidence\":0-3}。没有值得的就 {\"sha\":\"\"}。\n\n" + listing)
+        "从下面候选中按值得程度挑**最多 3 条**：优先真 bug 修复、改动小、且不太可能与本"
+        "仓已有实现冲突。输出 JSON：{\"picks\":[{\"sha\":\"...\",\"why\":\"一句话\","
+        "\"risk\":\"一句话\",\"confidence\":0-3}]}。没有值得的就 {\"picks\":[]}。\n\n" + listing)
     key = os.environ.get("LLM_API_KEY", "")
     base = os.environ.get("LLM_BASE_URL", "")
     model = os.environ.get("LLM_MODEL", "")
@@ -120,46 +126,53 @@ def main():
         write_report(lines)
         return 0
 
-    sha = (choice.get("sha") or "").strip()
-    say(lines, f"判定：{sha or '（无）'} · 置信 {choice.get('confidence')} · "
-               f"{choice.get('why', '')} · 风险 {choice.get('risk', '')}")
-    if not sha or int(choice.get("confidence") or 0) < 2:
-        say(lines, "置信不足，只出报告。")
+    picks = [p for p in (choice.get("picks") or []) if p.get("sha")]
+    if not picks:
+        say(lines, "没有值得吸收的候选。")
         write_report(lines)
         return 0
-    if sha not in {c[0] for c in cands}:
-        say(lines, "模型给的 sha 不在候选里，忽略。")
-        write_report(lines)
-        return 0
+    known = {c[0] for c in cands}
+    say(lines, "模型排序：" + " · ".join(
+        f"{p['sha']}({p.get('confidence')})" for p in picks))
 
-    # 4) 禁区自检：这条提交碰了 never 列表就不动
-    files = run("git", "show", "--name-only", "--format=", sha).split()
-    hits = [f for f in files for bad in FORBIDDEN if f.startswith(bad)]
-    if hits:
-        say(lines, f"该提交改动了禁区文件，跳过：{sorted(set(hits))}")
+    # 4) 逐条尝试：挑错一条不该让整天白跑（实测第一次真跑就挑了本仓早已实现过的那条，
+    #    冲突后直接收场）。取第一条禁区干净、cherry-pick 无冲突、测试通过的实施。
+    chosen = None
+    for pick in picks[:3]:
+        sha = pick["sha"].strip()
+        if sha not in known or int(pick.get("confidence") or 0) < 2:
+            say(lines, f"{sha}: 不在候选里或置信不足，跳过。")
+            continue
+        files = run("git", "show", "--name-only", "--format=", sha).split()
+        hits = [f for f in files for bad in FORBIDDEN if f.startswith(bad)]
+        if hits:
+            say(lines, f"{sha}: 改了禁区文件 {sorted(set(hits))}，跳过。")
+            continue
+        if args.dry_run:
+            say(lines, f"{sha}: dry-run 命中（{pick.get('why', '')}），不 cherry-pick。")
+            write_report(lines)
+            return 0
+        branch = pol["branch_prefix"] + sha
+        run("git", "checkout", "-q", "-B", branch, pol["base"])
+        code, out = run("git", "cherry-pick", "-x", sha, check=False)
+        if code != 0:
+            run("git", "cherry-pick", "--abort", check=False)
+            say(lines, f"{sha}: cherry-pick 冲突，换下一条。\n```\n" + out[:600] + "\n```")
+            continue
+        code, out = run("go", "test", "./...", check=False)
+        if code != 0:
+            say(lines, f"{sha}: 测试未通过，换下一条。\n```\n" + out[-1200:] + "\n```")
+            run("git", "checkout", "-q", pol["base"])
+            continue
+        chosen = (sha, pick, branch)
+        break
+    if not chosen:
+        say(lines, "候选都不满足条件，本次不开 PR（只出报告）。")
         write_report(lines)
         return 0
-
-    if args.dry_run:
-        say(lines, "dry-run：不 cherry-pick、不推送。")
-        write_report(lines)
-        return 0
-
-    # 5) cherry-pick → 测试 → 开 PR（任一步失败都只出报告）
-    branch = pol["branch_prefix"] + sha
-    run("git", "checkout", "-q", "-B", branch, pol["base"])
-    code, out = run("git", "cherry-pick", "-x", sha, check=False)
-    if code != 0:
-        run("git", "cherry-pick", "--abort", check=False)
-        say(lines, "cherry-pick 冲突，本次不开 PR（需人工判断）：\n```\n" + out[:800] + "\n```")
-        write_report(lines)
-        return 0
-    code, out = run("go", "test", "./...", check=False)
-    if code != 0:
-        say(lines, "cherry-pick 后测试未通过，本次不开 PR：\n```\n" + out[-1500:] + "\n```")
-        write_report(lines)
-        return 0
-
+    sha, pick, branch = chosen
+    choice = pick
+    say(lines, f"选定 {sha}：{pick.get('why', '')} · 风险 {pick.get('risk', '')}")
     run("git", "push", "-q", "-u", "origin", branch)
     title = f"autobot: 吸收上游 {sha} — {choice.get('why', '')}"[:120]
     body = (f"自动挑选的上游提交 `{sha}`（cherry-pick -x）。\n\n"
