@@ -62,7 +62,16 @@ func normalizeModelName(obj map[string]any) {
 // 无显式限额的请求按目录动态值补 max_tokens（见 injectCatalogMaxTokens）。
 // maxOut 为 nil 时行为与 …AndDefault 完全一致。
 // 返回改写后的请求体与本次**实际生效**的思考档位（未携带该字段/未知模型/未知档位 → ""）。
+//
+// 导出入口不注入 prompt_cache_key（保持既有公开语义）；生产路径由
+// client.prepareBody 调用 prepareBodyOpt 并传入 cache 参数。
 func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64) ([]byte, string) {
+	return prepareBodyOpt(src, sanitize, efforts, defaultEfforts, maxOut, "", "", false)
+}
+
+// prepareBodyOpt 是完整管线：injectCache=true 时在同一次 map 解析里注入
+// prompt_cache_key（优先级见 promptCacheKeyFor），避免二次 Unmarshal/Marshal。
+func prepareBodyOpt(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, maxOut map[string]int64, cacheUID, cacheConversation string, injectCache bool) ([]byte, string) {
 	if len(src) == 0 {
 		return src, ""
 	}
@@ -123,6 +132,12 @@ func PrepareBodyOptWithEffortsDefaultAndCaps(src []byte, sanitize bool, efforts 
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)
+		}
+	}
+	// prompt_cache_key：与 body 改写共用同一次 map，避免再 Unmarshal/Marshal 一遍。
+	if injectCache {
+		if key, ok := promptCacheKeyFor(obj, cacheUID, cacheConversation); ok {
+			obj["prompt_cache_key"] = key
 		}
 	}
 	out, err := json.Marshal(obj)
