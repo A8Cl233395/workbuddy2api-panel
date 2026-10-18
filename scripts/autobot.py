@@ -162,6 +162,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
+    # CI runner 没有 git 身份：cherry-pick 与适配提交都会死在 "Please tell me who you are"
+    # （本地验不出来，因为本地仓库先配过）。仓库级设一次，覆盖两条提交路径。
+    run("git", "config", "user.name", "autobot")
+    run("git", "config", "user.email", "autobot@users.noreply.github.com")
+
     cfg = yaml.safe_load(open(os.path.join(ROOT, "AutoBot.yml"), encoding="utf-8"))
     up, pol = cfg["upstream"], cfg["policy"]
     src = (args.repo or up["repo"]).replace("https://github.com/", "").replace(".git", "").strip("/")
