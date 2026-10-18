@@ -46,8 +46,6 @@ jobs:
 
   analyze:
     needs: plan
-    # 指定单仓时只有第 0 片干活，其余直接跳过（否则 17 个分片重复分析同一个仓）
-    if: inputs.repo == '' || matrix.shard == '0/17' 
     # 66 个仓一个 job 串行跑不完，按片并行；每片自己 clone、自己分析、自己上传报告
     strategy:
       fail-fast: false
@@ -88,6 +86,8 @@ jobs:
           pi --list-models
       - run: python3 -m pip install --quiet pyyaml
       - name: 分析这一片
+        # 指定单仓时只有第 0 片干活，其余跳过（job 级 if 引用不了 matrix，只能放这里）
+        if: inputs.repo == '' || matrix.shard == '0/17'
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
