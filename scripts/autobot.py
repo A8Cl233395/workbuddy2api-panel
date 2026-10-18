@@ -75,7 +75,7 @@ def main():
     lines = ["# AutoBot 报告", ""]
 
     # 1) 候选：最近 N 天的上游提交（合并提交不收，它没有独立改动）
-    log = run("git", "log", f"--since={up['lookback_days']} days ago",
+    log = run("git", "log", f"--max-count={up['limit']}",
               "--no-merges", "--format=%h%x09%ad%x09%s", "--date=short", up["remote"] + "/main")
     cands = [l.split("\t", 2) for l in log.splitlines()
              if l.strip() and not re.match(r"\s*chore", l.split("\t", 2)[2])]
@@ -83,7 +83,7 @@ def main():
         say(lines, "最近没有新的上游提交。")
         write_report(lines)
         return 0
-    say(lines, f"候选 {len(cands)} 条（近 {up['lookback_days']} 天，已去合并提交）。")
+    say(lines, f"候选 {len(cands)} 条（最近 {up['limit']} 条上游提交，已去合并与 chore）。")
 
     # 2) 已处理过的就跳过（分支名去重，不维护状态文件）
     tried = set(run("git", "ls-remote", "--heads", "origin", pol["branch_prefix"] + "*").split())
