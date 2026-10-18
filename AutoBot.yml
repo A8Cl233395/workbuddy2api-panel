@@ -12,8 +12,11 @@ upstream:
   # mode=port 让 LLM 读懂上游逻辑，用 Go 在本仓重写并接进既有调用路径；只新增文件不接线的
   # （孤儿实现）会被丢弃，落地前还要过 go build / go vet / go test。
   repos_mode: port
-  # 每轮最多扫几个兄弟项目，按日期轮转（65 个全扫一轮放不进 CI 时限，也白烧 65 次 LLM）。
-  repos_per_run: 8
+  # 一轮把全部仓库的候选都收上来做分诊——按天轮转会让活跃仓的更新等一周才被看到。
+  # 分诊按仓分批喂模型（一个仓一次调用 / 全塞一个 prompt 会顶爆上下文，都不可取）。
+  triage_batch: 6
+  triage_top: 6         # 分诊时每批最多挑几条
+  land_max: 2           # 每轮最多真正落地几条（每条会起 agent，5-10 分钟）
   repos:
     - ardeyouxipianyi/workbuddy2api-hub
     - yuechuya/WorkBuddy2API-Gateway
@@ -89,7 +92,7 @@ policy:
   base: main
   branch_prefix: autobot/
   label: autobot
-  max_prs_per_run: 1        # 一次最多开一个 PR：宁可少，不可轰炸
+  max_prs_per_run: 2        # 一轮最多开两个 PR：宁可少，不可轰炸
   # 允许改测试：不允许的话「有没有回归」就无法证明。
   allow_test_changes: true
   # LLM 的职责边界：只做「挑哪条」，不写代码。代码由 git cherry-pick 搬，

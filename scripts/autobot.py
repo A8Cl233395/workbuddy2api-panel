@@ -329,49 +329,8 @@ def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt"):
     return finish(sha, lines, mode, mp)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", help="临时指定上游仓库（owner/name 或 URL），默认取 AutoBot.yml")
-    ap.add_argument("--mode", choices=["cherry-pick", "port"],
-                    help="配合 --repo 用；默认取 AutoBot.yml 的 repos_mode（兄弟项目=port）")
-    ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args()
-
-    # CI runner 本来没有 git 身份。身份只在要提交的命令上用 BOT 传 -c，不写 git config：
-    # 写仓库配置会污染本机手写提交（事故：3 个提交变成 autobot）。
-    # PR 的 author 仍是 AUTOBOT_TOKEN 的所有者——用 GITHUB_TOKEN 才显示 bot，但那样不再触发其它 workflow。
-
-    cfg = yaml.safe_load(open(os.path.join(ROOT, "AutoBot.yml"), encoding="utf-8"))
-    up, pol = cfg["upstream"], cfg["policy"]
-    if args.repo:
-        # --repo 是「临时看别的仓」，默认按兄弟项目的 port 走；显式 --mode 优先
-        aims = [(args.repo, args.mode or up.get("repos_mode") or pol["mode"])]
-    else:
-        sibs = up.get("repos") or []
-        n = up.get("repos_per_run") or len(sibs)
-        if 0 < n < len(sibs):  # 按日期轮转，起点每天前移，轮到全部只要 len/n 天
-            # 每天前移一整个窗口（不是 1 格），65/8 天扫完全部
-            start = (date.today().toordinal() * n) % len(sibs)
-            sibs = [sibs[(start + i) % len(sibs)] for i in range(n)]
-        aims = [(up["repo"], pol["mode"])] + [(r, up.get("repos_mode", pol["mode"])) for r in sibs]
-    lines = ["# AutoBot 报告", ""]
-    opened = 0
-    for raw, mode in aims:
-        src = raw.replace("https://github.com/", "").replace(".git", "").strip("/")
-        say(lines, "")
-        say(lines, f"## {src}")
-        # 上一条可能停在 autobot/<sha> 上（测试失败或已开 PR），换上游前必须回基线：
-        # 否则下一条的 git cherry 会拿错 HEAD 比对，分支也从错的地方拉出来。
-        run("git", "checkout", "-q", pol["base"])
-        opened += absorb(src, mode, up, pol, args, lines)
-        if opened >= pol["max_prs_per_run"]:
-            break
-    write_report(lines)
-    return 0
-
-
-def absorb(src, mode, up, pol, args, lines):
-    # 1) 拉上游：--repo 可临时换别家，走同一个 src remote
+def fetch_upstream(src):
+    """拉上游，返回 (默认分支, 错误信息)。"""
     run("git", "remote", "remove", "src", check=False)
     run("git", "remote", "add", "src", f"https://github.com/{src}.git")
     # 默认分支不一定是 main（清单里有 8 个是 master），问一次远端
@@ -379,11 +338,11 @@ def absorb(src, mode, up, pol, args, lines):
     m = re.search(r"ref: refs/heads/(\S+)\s+HEAD", out or "")
     branch = m.group(1) if m else "main"
     code, msg = run("git", "fetch", "-q", "src", branch, check=False)
-    if code != 0:
-        say(lines, f"拉取 {src} 失败：{msg[:300]}")
-        return 0
+    return (None, msg) if code != 0 else (branch, "")
 
-    # 2) 候选：最近 N 条非 merge、非 chore 提交
+
+def candidates_of(branch, up, pol, limit=12):
+    """未处理过的候选：去 merge/chore/已吸收（patch-id）/已试过（分支名）。"""
     log = run("git", "log", f"--max-count={up['limit']}", "--no-merges",
               "--format=%h%x09%ad%x09%s", "--date=short", f"src/{branch}")
     cands = [l.split("\t", 2) for l in log.splitlines()
@@ -394,97 +353,163 @@ def absorb(src, mode, up, pol, args, lines):
     cands = [c for c in cands if c[0] not in applied]
     tried = set(run("git", "ls-remote", "--heads", "origin", pol["branch_prefix"] + "*").split())
     cands = [c for c in cands if f"refs/heads/{pol['branch_prefix']}{c[0]}" not in tried]
-    if not cands:
-        say(lines, f"{src}：没有未处理的新提交（已去 merge/chore/已吸收/已试过）。")
-        return 0
-    say(lines, f"{src}：候选 {len(cands)} 条（最近 {up['limit']} 条上游提交，已去 merge/chore/已吸收）。")
+    return cands[:limit]
 
-    listing = "\n".join(
-        f"- {sha} {date} {subj} | " + run("git", "show", "--stat=0", "--name-only",
-                                          "--format=", sha).replace("\n", ",")
-        for sha, date, subj in cands[:40])
-    key = os.environ.get("LLM_API_KEY", "")
-    base_url = os.environ.get("LLM_BASE_URL", "")
-    model = os.environ.get("LLM_MODEL", "")
 
-    # 3) 没 key 就只出清单（本地跑与首次接入时的正常降级）
+def listing_of(src, cands):
+    return [f"- {src} {sha} {date} {subj} | " +
+            run("git", "show", "--stat=0", "--name-only", "--format=", sha).replace("\n", ",")
+            for sha, date, subj in cands]
+
+
+def judge(srcs, cands_by_src, up, pol, lines, top):
+    """让模型挑值得吸收的提交。一轮把多个仓库的清单合并喂，省调用次数。"""
+    key, base_url, model = (os.environ.get("LLM_API_KEY", ""), os.environ.get("LLM_BASE_URL", ""),
+                            os.environ.get("LLM_MODEL", ""))
+    known, modes = {}, {}
+    for src in srcs:
+        modes[src] = "cherry-pick" if src == up["repo"] else up.get("repos_mode", pol["mode"])
+        known[src] = {c[0] for c in cands_by_src[src]}
     if not (key and base_url and model):
         say(lines, "未配置 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL：只出候选清单，不开 PR。")
-        say(lines)
-        say(lines, listing)
-        return 0
-
-    # 4) 让模型排序：挑哪条、为什么、风险、置信度
-    note = "" if mode == "cherry-pick" else (
-        f"注意：{src} 是另一套实现（语言/结构不同），代码不能直接搬，只能借鉴思路与接口设计；"
-        "只有你能说清「本仓对应模块在哪、怎么改」时才算值得挑。\n")
-    prompt = (
-        note + "你在给一个 fork 挑选值得吸收的上游提交。本仓是 workbuddy2api-panel 的长期 fork，"
+        say(lines, "\n".join(rows))
+        return []
+    other = [s for s in srcs if modes[s] != "cherry-pick"]
+    note = ("注意：" + "、".join(other) + " 是另一套实现（语言/结构不同），代码不能直接搬，"
+            "只能借鉴思路与接口设计；只有能说清「本仓对应模块在哪、怎么改」时才算值得挑。\n") if other else ""
+    head = (
+        note + "你在给一个 fork 筛选值得吸收的上游提交。本仓是 workbuddy2api-panel 的长期 fork，"
         "缓存键、补偿、检索、签到、面板、调度都有自有实现。\n"
-        "按值得程度挑**最多 3 条**：优先真 bug 修复、改动小、目的清晰。输出 JSON："
-        "{\"picks\":[{\"sha\":\"...\",\"why\":\"一句话\",\"risk\":\"一句话\",\"confidence\":0-3}]}。"
-        "没有值得的就 {\"picks\":[]}。\n\n" + listing)
-    try:
-        picks = [p for p in (pick_json(llm(base_url, key, model, prompt)).get("picks") or [])
-                 if p.get("sha")]
-    except Exception as e:  # noqa: BLE001 —— LLM 侧任何失败都降级成报告
-        say(lines, f"LLM 调用失败，本次不开 PR：{e}")
-        return 0
+        "每条格式：`- 仓库 sha 日期 标题 | 改动文件`。按值得程度挑**最多 %d 条**："
+        "优先真 bug 修复与行为缺失、改动小、目的清晰；纯样式/CI/文档改动跳过。\n"
+        "输出 JSON：{\"picks\":[{\"repo\":\"owner/name\",\"sha\":\"...\",\"why\":\"一句话\","
+        "\"risk\":\"一句话\",\"confidence\":0-3}]}。没有值得的就 {\"picks\":[]}。\n\n"
+        % top)
+    # 分批：一次调用喂 triage_batch 个仓库的清单。66 个仓全塞一个 prompt 会顶爆上下文，
+    # 而一个仓库一次调用又要 66 次——按仓分批是两头都省的那一档。
+    batch = int(up.get("triage_batch") or 6)
+    picks = []
+    for i in range(0, len(srcs), batch):
+        group = srcs[i:i + batch]
+        rows = [r for src in group for r in listing_of(src, cands_by_src[src])]
+        say(lines, f"分诊第 {i // batch + 1} 批：{len(group)} 个仓库 / {len(rows)} 条候选")
+        try:
+            got = pick_json(llm(base_url, key, model, head + "\n".join(rows))).get("picks") or []
+        except Exception as e:  # noqa: BLE001 —— LLM 侧任何失败都降级成报告
+            say(lines, f"分诊第 {i // batch + 1} 批失败：{e}")
+            continue
+        picks += filter_picks(got, known, modes)
     if not picks:
-        say(lines, "模型判定没有值得吸收的候选。")
+        say(lines, "分诊结果：无")
+        return []
+    picks.sort(key=lambda x: -x[5])
+    say(lines, "分诊结果：" + " · ".join(f"{p[0].split('/')[-1]}@{p[2]}({p[5]})" for p in picks))
+    return picks
+
+
+def filter_picks(got, known, modes):
+    picks = []
+    for q in got:
+        src, sha = (q.get("repo") or "").strip(), (q.get("sha") or "").strip()
+        if src not in known or sha not in known[src]:  # 模型编造的挡掉
+            continue
+        picks.append((src, modes[src], sha, q.get("why", ""), q.get("risk", ""),
+                      int(q.get("confidence") or 0)))
+    return picks
+
+
+def land(src, mode, sha, why, risk, pol, args, lines):
+    """把一条候选落地成 PR。返回是否开成。"""
+    hits = [f for f in run("git", "show", "--name-only", "--format=", sha).split()
+            for bad in FORBIDDEN if f.startswith(bad)]
+    if hits:
+        say(lines, f"{sha}: 改了禁区文件 {sorted(set(hits))}，跳过。")
         return 0
-    say(lines, "模型排序：" + " · ".join(f"{p['sha']}({p.get('confidence')})" for p in picks))
-
-    # 5) 逐条尝试：cherry-pick 失败 → 交模型适配 → 仍由 go test 裁决
-    known = {c[0] for c in cands}
-    for pick in picks[:3]:
-        sha = pick["sha"].strip()
-        if sha not in known or int(pick.get("confidence") or 0) < 2:
-            say(lines, f"{sha}: 不在候选里或置信不足，跳过。")
-            continue
-        hits = [f for f in run("git", "show", "--name-only", "--format=", sha).split()
-                for bad in FORBIDDEN if f.startswith(bad)]
-        if hits:
-            say(lines, f"{sha}: 改了禁区文件 {sorted(set(hits))}，跳过。")
-            continue
-        if args.dry_run:
-            say(lines, f"{sha}: dry-run 命中（{pick.get('why', '')}），不落地。")
-            return 0
-        branch = pol["branch_prefix"] + sha
-        run("git", "checkout", "-q", "-B", branch, pol["base"])
-        how, ok, mp = "cherry-pick", False, ""
-        if mode == "cherry-pick":
-            code, out = run("git", *BOT, "cherry-pick", "-x", sha, check=False)
-            if code == 0:
-                code, out = run("go", "test", "./...", check=False)
-                ok = code == 0
-                if not ok:
-                    run("git", "checkout", "-q", pol["base"])
-                    say(lines, f"{sha}: 移植后测试未通过，换下一条。\n```\n" + out[-1200:] + "\n```")
-                    continue
-            else:
-                run("git", "cherry-pick", "--abort", check=False)
-        if not ok:
-            # 兄弟项目不是本仓 fork：代码搬过来只会变成垃圾文件，只能借鉴思路
-            say(lines, f"{sha}: " + ("直搬失败" if mode == "cherry-pick" else "跳过直搬") + "，改试 LLM 适配。")
-            ok, mp = adapt(sha, pol["base"], branch, base_url, key, model, lines, mode)
+    if args.dry_run:
+        say(lines, f"{sha}: dry-run 命中（{why}），不落地。")
+        return 0
+    branch = pol["branch_prefix"] + sha
+    run("git", "checkout", "-q", "-B", branch, pol["base"])
+    base_url = os.environ.get("LLM_BASE_URL", "")
+    key = os.environ.get("LLM_API_KEY", "")
+    model = os.environ.get("LLM_MODEL", "")
+    how, ok, mp = "cherry-pick", False, ""
+    if mode == "cherry-pick":
+        code, out = run("git", *BOT, "cherry-pick", "-x", sha, check=False)
+        if code == 0:
+            code, out = run("go", "test", "./...", check=False)
+            ok = code == 0
             if not ok:
-                continue
-            how = "LLM 适配" if mode != "port" else "LLM 移植（跨语言重写）"
-        run("git", "push", "-q", "-u", "origin", branch)
-        run("gh", "label", "create", pol["label"], "--repo", os.environ["GITHUB_REPOSITORY"],
-            "--color", "ededed", "--description", "AutoBot 自动挑选的上游改动", check=False)
-        title = f"autobot: 吸收 {src}@{sha} — {pick.get('why', '')}"[:120]
-        body = (f"来源 `{src}@{sha}`，实施方式：**{how}**。\n\n"
-                f"- 理由：{pick.get('why', '')}\n- 风险：{pick.get('risk', '')}\n"
-                + (f"- 行为映射：{mp}\n" if mp else "")
-                + "- `go build` / `go vet` / `go test ./...` 已通过；合并前请人工确认行为等价。\n")
-        run("gh", "pr", "create", "--repo", os.environ["GITHUB_REPOSITORY"], "--base", pol["base"],
-            "--head", branch, "--title", title, "--body", body, "--label", pol["label"])
-        say(lines, f"已开 PR（{how}）：{branch}")
-        return 1
+                run("git", "checkout", "-q", pol["base"])
+                say(lines, f"{sha}: 移植后测试未通过，换下一条。\n```\n" + out[-1200:] + "\n```")
+                return 0
+        else:
+            run("git", "cherry-pick", "--abort", check=False)
+    if not ok:
+        # 兄弟项目不是本仓 fork：代码搬过来只会变成垃圾文件，只能借鉴思路
+        say(lines, f"{sha}: " + ("直搬失败" if mode == "cherry-pick" else "跳过直搬") + "，改试 LLM 适配。")
+        ok, mp = adapt(sha, pol["base"], branch, base_url, key, model, lines, mode)
+        if not ok:
+            return 0
+        how = "LLM 适配" if mode != "port" else "LLM 移植（跨语言重写）"
+    run("git", "push", "-q", "-u", "origin", branch)
+    run("gh", "label", "create", pol["label"], "--repo", os.environ["GITHUB_REPOSITORY"],
+        "--color", "ededed", "--description", "AutoBot 自动挑选的上游改动", check=False)
+    title = f"autobot: 吸收 {src}@{sha} — {why}"[:120]
+    body = (f"来源 `{src}@{sha}`，实施方式：**{how}**。\n\n"
+            f"- 理由：{why}\n- 风险：{risk}\n"
+            + (f"- 行为映射：{mp}\n" if mp else "")
+            + "- `go build` / `go vet` / `go test ./...` 已通过；合并前请人工确认行为等价。\n")
+    run("gh", "pr", "create", "--repo", os.environ["GITHUB_REPOSITORY"], "--base", pol["base"],
+        "--head", branch, "--title", title, "--body", body, "--label", pol["label"])
+    say(lines, f"已开 PR（{how}）：{branch}")
+    return 1
 
-    say(lines, "候选都不满足条件，本次不开 PR（只出报告）。")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--repo", help="只看这一个上游（owner/name 或 URL），默认按 AutoBot.yml 全量扫")
+    ap.add_argument("--mode", choices=["cherry-pick", "port"], help="配合 --repo 用")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    cfg = yaml.safe_load(open(os.path.join(ROOT, "AutoBot.yml"), encoding="utf-8"))
+    up, pol = cfg["upstream"], cfg["policy"]
+    lines = ["# AutoBot 报告", ""]
+
+    if args.repo:
+        # 手动单仓：全量分诊也走同一条判定，只是范围小、可以更宽容
+        srcs = [(args.repo, args.mode or up.get("repos_mode") or pol["mode"])]
+        land_max, top = 1, 3
+    else:
+        srcs = [(up["repo"], pol["mode"])] + [(r, up.get("repos_mode", pol["mode"]))
+                                             for r in (up.get("repos") or [])]
+        land_max, top = int(up.get("land_max") or 2), int(up.get("triage_top") or 6)
+
+    # 一轮把全部上游的候选都收上来：活跃仓每天都有新提交，按天轮转会让它们等一周
+    cands_by_src = {}
+    for raw, _mode in srcs:
+        src = raw.replace("https://github.com/", "").replace(".git", "").strip("/")
+        branch, err = fetch_upstream(src)
+        if branch is None:
+            say(lines, f"{src}：拉取失败 {err[:200]}")
+            continue
+        run("git", "checkout", "-q", pol["base"])  # 回来基线：下一条的 cherry 要拿对 HEAD
+        c = candidates_of(branch, up, pol)
+        if not c:
+            say(lines, f"{src}：无未处理提交")
+            continue
+        cands_by_src[src] = c
+        say(lines, f"{src}：候选 {len(c)} 条")
+
+    picks = judge(list(cands_by_src), cands_by_src, up, pol, lines, top) if cands_by_src else []
+    opened = 0
+    for src, mode, sha, why, risk, conf in picks:
+        if conf < 2 or opened >= land_max:
+            continue
+        opened += land(src, mode, sha, why, risk, pol, args, lines)
+    if not opened:
+        say(lines, "本轮没有落地（只出报告）。")
     write_report(lines)
     return 0
 
