@@ -13,6 +13,13 @@ on:
       repo:
         description: "只分析这一个仓库（owner/name），留空则按 AutoBot.yml 全量"
         required: false
+      phase:
+        description: "analyze / implement / all"
+        required: false
+        default: all
+      reports_run:
+        description: "implement 复用的报告来自哪一轮 run id（留空=本轮）"
+        required: false
 
 permissions:
   contents: write
@@ -46,6 +53,7 @@ jobs:
 
   analyze:
     needs: plan
+    if: inputs.phase != 'implement' 
     # 66 个仓一个 job 串行跑不完，按片并行；每片自己 clone、自己分析、自己上传报告
     strategy:
       fail-fast: false
@@ -183,9 +191,18 @@ jobs:
           pi --list-models
       - run: python3 -m pip install --quiet pyyaml
       - uses: actions/download-artifact@v4
+        if: inputs.reports_run == ''
         with:
           path: /tmp/artifacts
           pattern: reports-*
+      - name: 复用指定轮次的报告
+        if: inputs.reports_run != ''
+        env:
+          GH_TOKEN: ${{ secrets.AUTOBOT_TOKEN }}
+        run: |
+          mkdir -p /tmp/artifacts
+          gh run download "${{ inputs.reports_run }}" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'reports-*' --dir /tmp/artifacts
       - name: 汇总报告
         run: |
           mkdir -p /tmp/autobot-reports
