@@ -63,9 +63,11 @@ async function api(path, opts = {}) {
   if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
-  if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
+  // status 挂到错误上：调用方靠它区分「可重试的抖动」与「重试无意义的终态」
+  // （登录轮询据此决定继续等 OAuth 还是提示重新发起）。
+  if (r.status === 401) { openKey(); const e = new Error('密钥无效或未填写'); e.status = 401; throw e; }
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  if (!r.ok) { const e = new Error(d.error || ('HTTP ' + r.status)); e.status = r.status; throw e; }
   return d;
 }
 function toast(msg, cls) {
@@ -571,7 +573,11 @@ $('accBody').addEventListener('click', async ev => {
       toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');
     }
   } catch (e) { toast(e.message, 'err'); }
-  finally { b.disabled = false; loadOverview(true); }
+  finally {
+    b.disabled = false;
+    if (a !== 'tasks') invalidatePackages();
+    loadOverview(true);
+  }
 });
 
 $('btnCheckinAll').onclick = async () => {
@@ -1341,7 +1347,8 @@ function startAddLogin() {
     $('addLoad').hidden = true; $('addReady').hidden = false;
     $('btnStartLogin').hidden = true;
     $('btnCopyUrl').hidden = false; $('btnOpenUrl').hidden = false;
-    loginTimer = setInterval(pollLogin, 3000);
+    pollFails = 0;
+  loginTimer = setInterval(pollLogin, 3000);
   }).catch(e => {
     $('addLoad').hidden = true;
     $('btnStartLogin').disabled = false;
@@ -1350,22 +1357,42 @@ function startAddLogin() {
   });
 }
 function stopPoll() { if (loginTimer) { clearInterval(loginTimer); loginTimer = null; } }
+// pollFails 连续查询失败计数：网络抖动不该让用户以为「重新登录没用」。OAuth 可能已经在
+// 浏览器侧完成，只是这次没收到结果——停掉轮询账号就永远不入池。
+let pollFails = 0;
+const POLL_MAX_FAILS = 20;
 async function pollLogin() {
   if (!loginState) return;
   try {
     const r = await api('login/poll?state=' + encodeURIComponent(loginState));
+    pollFails = 0;
     if (r.done) {
       stopPoll();
       $('addReady').hidden = true;
       $('addDone').hidden = false;
-      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + (r.credits >= 0 ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + '，账号已载入池中';
+      const warn = r.balance_error ? '；但余额校验失败：' + r.balance_error + '（若持续 401，请在浏览器退出腾讯账号后重登）' : '';
+      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + (r.credits >= 0 ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + '，账号已载入池中' + warn;
+      invalidatePackages(); // 凭据换新：缓存里的旧 401 行必须作废
       setTimeout(() => { closeAdd(); loadOverview(true); }, 1600);
     }
   } catch (e) {
-    stopPoll();
-    $('addReady').hidden = true;
+    if (e.status === 404 || e.status === 410) {
+      stopPoll();
+      $('addReady').hidden = true;
+      $('addErr').hidden = false;
+      $('addErr').textContent = '登录会话已过期，请关闭后重新添加';
+      return;
+    }
+    pollFails++;
+    if (pollFails >= POLL_MAX_FAILS) {
+      stopPoll();
+      $('addReady').hidden = true;
+      $('addErr').hidden = false;
+      $('addErr').textContent = '连续 ' + POLL_MAX_FAILS + ' 次查询失败，已停止轮询：' + e.message + '（授权可能已完成，可关闭后重新添加）';
+      return;
+    }
     $('addErr').hidden = false;
-    $('addErr').textContent = e.message + '（关闭后重新添加）';
+    $('addErr').textContent = '网络中断，自动重试中（' + pollFails + '/' + POLL_MAX_FAILS + '）：' + e.message;
   }
 }
 function closeAdd() { stopPoll(); loginState = null; $('addVeil').classList.remove('on'); }
@@ -1392,6 +1419,7 @@ $('importFile').onchange = async () => {
     if (d.errors && d.errors.length) {
       console.warn('import errors:', d.errors);
     }
+    invalidatePackages();
     loadOverview(true);
   } catch (e) {
     $('importErr').hidden = false;
@@ -3128,6 +3156,11 @@ if ($('compBody')) $('compBody').addEventListener('click', ev => {
 });
 
 let lastPackages = null, lastPackagesAt = 0, lastPkLimit = 0;
+
+// invalidatePackages 账号/凭据/余额变更后作废积分构成与到期明细缓存。
+// 缓存没有 TTL，不加这一处会把旧 401 行一直顶到用户手点刷新——重新登录后
+// 「点检查还是 401」的观感就是这么来的。
+function invalidatePackages() { lastPackages = null; lastPackagesAt = 0; }
 
 async function loadPackages(force) {
   if (!force && lastPackages) {
