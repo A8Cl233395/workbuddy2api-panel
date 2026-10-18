@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 import yaml
 
@@ -40,14 +41,25 @@ def say(lines, text=""):
 
 
 def pi(task, timeout):
-    """跑一次 PI：cwd=本仓，默认系统提示词与上下文，不做裁剪。"""
-    try:
-        code, out = run("pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
-                        "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
-                        task, check=False, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return 124, "超时"
-    return code, " / ".join((out.strip().splitlines() or [""])[-2:])[:300]
+    """跑一次 PI：cwd=本仓，默认系统提示词与上下文，不做裁剪。
+
+    429 是免费档的常态（并发一高就打满），退避重试三次再认输。
+    """
+    tail = ""
+    for attempt in range(3):
+        try:
+            code, out = run("pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
+                            "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
+                            task, check=False, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return 124, "超时"
+        tail = " / ".join((out.strip().splitlines() or [""])[-2:])[:300]
+        if code == 0 or "429" not in tail:
+            return code, tail
+        wait = 60 * (attempt + 1)
+        print(f"  429 限流，{wait}s 后重试（{attempt + 1}/3）", flush=True)
+        time.sleep(wait)
+    return code, tail
 
 
 def up_clone(src):
