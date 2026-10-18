@@ -17,6 +17,7 @@
 """
 
 import argparse
+from datetime import date
 import json
 import os
 import re
@@ -274,8 +275,13 @@ def main():
     if args.repo:
         aims = [(args.repo, pol["mode"])]
     else:
-        aims = [(up["repo"], pol["mode"])] + [(r, up.get("repos_mode", pol["mode"]))
-                                             for r in (up.get("repos") or [])]
+        sibs = up.get("repos") or []
+        n = up.get("repos_per_run") or len(sibs)
+        if 0 < n < len(sibs):  # 按日期轮转，起点每天前移，轮到全部只要 len/n 天
+            # 每天前移一整个窗口（不是 1 格），65/8 天扫完全部
+            start = (date.today().toordinal() * n) % len(sibs)
+            sibs = [sibs[(start + i) % len(sibs)] for i in range(n)]
+        aims = [(up["repo"], pol["mode"])] + [(r, up.get("repos_mode", pol["mode"])) for r in sibs]
     lines = ["# AutoBot 报告", ""]
     opened = 0
     for raw, mode in aims:
@@ -296,18 +302,22 @@ def absorb(src, mode, up, pol, args, lines):
     # 1) 拉上游：--repo 可临时换别家，走同一个 src remote
     run("git", "remote", "remove", "src", check=False)
     run("git", "remote", "add", "src", f"https://github.com/{src}.git")
-    code, msg = run("git", "fetch", "-q", "src", "main", check=False)
+    # 默认分支不一定是 main（清单里有 8 个是 master），问一次远端
+    code, out = run("git", "ls-remote", "--symref", "src", "HEAD", check=False)
+    m = re.search(r"ref: refs/heads/(\S+)\s+HEAD", out or "")
+    branch = m.group(1) if m else "main"
+    code, msg = run("git", "fetch", "-q", "src", branch, check=False)
     if code != 0:
         say(lines, f"拉取 {src} 失败：{msg[:300]}")
         return 0
 
     # 2) 候选：最近 N 条非 merge、非 chore 提交
     log = run("git", "log", f"--max-count={up['limit']}", "--no-merges",
-              "--format=%h%x09%ad%x09%s", "--date=short", "src/main")
+              "--format=%h%x09%ad%x09%s", "--date=short", f"src/{branch}")
     cands = [l.split("\t", 2) for l in log.splitlines()
              if l.strip() and not re.match(r"\s*chore", l.split("\t", 2)[2])]
     # git cherry 用 patch-id 挡掉「逐字节等同」的移植；改写实现的挡不住，交给适配路径。
-    applied = {l[2:9] for l in run("git", "cherry", "-v", "HEAD", "src/main").splitlines()
+    applied = {l[2:9] for l in run("git", "cherry", "-v", "HEAD", f"src/{branch}").splitlines()
                if l.startswith("- ")}
     cands = [c for c in cands if c[0] not in applied]
     tried = set(run("git", "ls-remote", "--heads", "origin", pol["branch_prefix"] + "*").split())

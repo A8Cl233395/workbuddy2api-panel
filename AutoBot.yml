@@ -12,10 +12,74 @@ upstream:
   # mode=port 让 LLM 读懂上游逻辑，用 Go 在本仓重写并接进既有调用路径；只新增文件不接线的
   # （孤儿实现）会被丢弃，落地前还要过 go build / go vet / go test。
   repos_mode: port
+  # 每轮最多扫几个兄弟项目，按日期轮转（65 个全扫一轮放不进 CI 时限，也白烧 65 次 LLM）。
+  repos_per_run: 8
   repos:
     - ardeyouxipianyi/workbuddy2api-hub
+    - yuechuya/WorkBuddy2API-Gateway
+    - HUIdada1/AgentHub
+    - 3155498108/workbuddy-one
+    - sheng-du0521/workbuddy2api
+    - OHCJ099/BuddyHub
+    - hj01857655/WorkBuddy2api
+    - Agent2API/agent2api
+    - syan-anan/wb-syan
+    - JackAIStudio/dsh-workbuddy-dual
+    - smart-open/TraeWorkAssistant
+    - deltrivx/AutoBuddy
+    - techysy/CreditDaddy
+    - spdw666/multi-agent-checkin-dsh
+    - 1557335006/workbuddy-checkin-tool
+    - Yhx888/dsh-free-egg-credits
+    - Costben/workbuddy2api
+    - zr987459/workbuddy-app
+    - chenpiyanghappy/dsh-buddy-suite
+    - bhh3349/workbuddy2api-prime
+    - dhdbvcg/dsh-workbuddy-console
+    - chengzhi-c/pi-desktop-wtq-pool
+    - chengzhi-c/dsh-wtq-pool
+    - liberation8/hermes-workbuddy-provider
+    - Misaka10091/workbuddy2api-panel
+    - xibai6668/Android-AI-gateway
+    - pandarick916/workbuddy_checkin
+    - 2861292267/DSH-Official-WorkBuddy-Credit-Proxy
     - ithtelab/workbuddy-manager
-    - 88lin/workbuddy-auto-signin
+    - caigee-cmd/cli2api
+    - 241793/workbuddy2API
+    - majiabin2020/WorkMami
+    - FireOpalus/dsh-workbuddy2api
+    - NextAgentX/qoder-trae-workbuddy-switch
+    - sofs2005/w2a
+    - dingminhua/dsh-connect-workbuddy
+    - newtypepan12-svg/workbuddy-qiandao
+    - pkqzzt/workbuddy2api-panel-plus
+    - rcwowhoo/workbuddy-checkin
+    - lehuaner/SSHMonitor
+    - Faide-cyber/dsh-workbuddy
+    - wefewe/workbuddy2api
+    - ChaYeWuu/dsh-hyperworkbuddy
+    - wicm84266964/Buddy2api
+    - xiaofan6ya/workbuddy2api
+    - HXX-ita/workbuddy-checkin
+    - thintsing/agent-checkin
+    - stevenwang288/WorkBuddy-Daily
+    - study-yang/workbuddy2codex
+    - gray0128/pi-workbuddy-connect
+    - autumnsentiment/workbuddy-helper
+    - GeekFong/traework-checkin-assistant
+    - jerry9692/dsh-workbuddy2api-panel
+    - babygoton/WorkDaddy
+    - AndroidSix/dsh-multi-router
+    - xbmaxx/cli2openai
+    - csszyft/wb2api
+    - PBY-CMYK/workbuddy-daily
+    - interli3/workbuddy-cloud-worker
+    - lxpkwwz/ql_scripts
+    - luoxh8/workbuddy-connect
+    - maiphucgiang/codebuddy2api
+    - a1007479270/aidaka
+    - fancylear/dsh-workbuddy-credits
+    - Libra1337/Reso2api
   # 取最近 N 条未处理的提交（每个上游各取 N 条）。刻意按条数而不是按天数：「N 天前」在上游安静的周里
   # 会恒为空（实测上游最后一条非 merge 提交是 10-11，7 天窗口刚好把它排除），
   # 白跑一轮还看不出是配置还是故障。已处理过的靠分支名去重，不需要状态文件。
