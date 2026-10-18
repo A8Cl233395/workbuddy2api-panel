@@ -146,16 +146,73 @@ def finish(sha, lines, mode, mp=""):
     run("git", *BOT, "commit", "-q", "-m", f"autobot: 适配上游 {sha}（LLM 改写，非原样移植）")
     return True, mp
 
-def pi_port(sha, lines, model):
-    """把一个上游提交交给 PI：它自己 grep/读/改/跑测试，链路与手动使用 PI 一致。"""
-    task = (
-        f"本仓是 Go 项目。上游提交 {sha} 是另一种语言的实现（多为 Python），"
-        f"用 `git show {sha}` 看它改了什么。\n"
+def up_clone(src):
+    """把上游仓完整 clone 到 /tmp/up/<slug>，供 agent 读整体实现。
+
+    只对已选中要落地的候选调用：65 个仓全 clone 太慢，分诊阶段看清单就够了。
+    """
+    slug = src.replace("/", "__")
+    d = os.path.join("/tmp/up", slug)
+    if os.path.isdir(os.path.join(d, ".git")):
+        run("git", "-C", d, "fetch", "-q", "--depth", "200", "origin", check=False)
+        return d
+    os.makedirs("/tmp/up", exist_ok=True)
+    code, msg = run("git", "clone", "-q", "--depth", "200",
+                    f"https://github.com/{src}.git", d, check=False)
+    if code != 0:
+        return ""
+    return d
+
+
+def up_clone(src):
+    """上游仓完整 clone 到 /tmp/up/<slug>，供 agent 读整体实现。
+
+    只对已选中要落地的候选调用：65 个仓全 clone 太慢，分诊阶段看清单就够。
+    """
+    d = os.path.join("/tmp/up", src.replace("/", "__"))
+    if os.path.isdir(os.path.join(d, ".git")):
+        run("git", "-C", d, "fetch", "-q", "--depth", "200", "origin", check=False)
+        return d
+    try:
+        os.makedirs("/tmp/up", exist_ok=True)
+    except OSError:
+        return ""
+    code, _ = run("git", "clone", "-q", "--depth", "200", f"https://github.com/{src}.git", d, check=False)
+    return d if code == 0 else ""
+
+
+def read_summary():
+    """PI 写的 PR 正文材料；读完即删，别让它混进提交。"""
+    f = os.path.join(ROOT, "autobot-pr.md")
+    if not os.path.isfile(f):
+        return ""
+    text = open(f, encoding="utf-8").read().strip()
+    os.remove(f)
+    return text
+
+
+def pi_port(sha, lines, model, src="", up_path=""):
+    """把一个上游提交交给 PI：读上游完整实现 → 用 Go 写等价实现 → 自测。
+
+    与手动用 PI 的链路一致：给它的不是一段 diff，而是上游仓库的完整代码。
+    """
+    head = f"本仓是 Go 项目。上游 {src or sha} 是另一种语言的实现（多为 Python）。\n"
+    if up_path:
+        head += (f"上游仓库已完整 clone 在 `{up_path}`（只读参考）：先在那里 `git show {sha}` "
+                 f"看这个提交，再 grep 相关模块读懂周边上下文。\n")
+    else:
+        head += f"用 `git show {sha}` 看它改了什么。\n"
+    task = head + (
         "读懂它修正或新增的行为，在本仓用 Go 实现同样的行为，并接进真实的调用路径。\n"
         "要求：至少修改一个既有 .go 文件；自己跑 `go build ./...`、`go vet ./...`、"
         "`go test ./...` 全绿；补一条能钉住该行为的测试。\n"
         "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
-        "最后一行输出：改了哪些文件 + 上游行为对应本仓的哪个 文件:函数。"
+        "完成后在本仓根目录写一份 autobot-pr.md，只包含这五行（不要别的话）：\n"
+        "问题: 上游这个提交修的是什么问题、本仓有没有同类问题\n"
+        "改动: 你做了什么\n"
+        "位置: 本仓改到的 文件:函数\n"
+        "优缺点: 这个改法的好处与代价\n"
+        "影响: 对现有行为/配置/性能的影响与风险\n"
     )
     models = [m.strip() for m in (os.environ.get("PI_MODELS") or model).split(",") if m.strip()] or [model]
     global _pi_deadline
@@ -164,7 +221,7 @@ def pi_port(sha, lines, model):
     for i in range(3):
         if time.time() > _pi_deadline:
             say(lines, f"  {sha}: 本轮 PI 时间预算已用完，跳过。")
-            return False
+            return False, "", ""
         m = models[i % len(models)]
         try:
             code, out = run("pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
@@ -174,21 +231,34 @@ def pi_port(sha, lines, model):
             code, out = 124, "超时（30 分钟）"
         if code == 0 and run("git", "status", "--porcelain", "-uall", check=False)[1].strip():
             say(lines, f"  {sha}: PI 产出改动（{m}）")
-            return True
+            return True, read_summary(), read_summary()
+        run("git", "checkout", "-q", "--", "autobot-pr.md", check=False)
         tail = " / ".join((out.strip().splitlines() or [""])[-3:])[:400]
         say(lines, f"  {sha}: 第 {i + 1} 次未产出（{m}，退出码 {code}）｜{tail}")
         run("git", "reset", "-q", "--hard", "HEAD", check=False)
         run("git", "clean", "-qfd", check=False)
-    return False
+    return False, "", ""
 
 
-def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt"):
+def read_summary():
+    """PI 写的 PR 正文材料；读完即删，别让它混进提交。"""
+    p = os.path.join(ROOT, "autobot-pr.md")
+    if not os.path.isfile(p):
+        return ""
+    text = open(p, encoding="utf-8").read().strip()
+    os.remove(p)
+    return text
+
+
+def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt", src=""):
     """让模型把上游提交改写成本仓能用的补丁，提交到 branch。返回 (是否成功, 行为映射)。"""
     run("git", "checkout", "-q", "-B", branch, base)
     if mode == "port" and shutil.which("pi"):
-        if not pi_port(sha, lines, model):
+        ok, summary = pi_port(sha, lines, model, src, up_clone(src))
+        if not ok:
             return False, ""
-        return finish(sha, lines, mode)
+        ok, mp = finish(sha, lines, mode, summary)
+        return ok, (summary or mp)
     diff = run("git", "show", "--format=", sha)
     files = run("git", "show", "--name-only", "--format=", sha).split()
     excerpts = []
@@ -390,7 +460,7 @@ def land(src, mode, sha, why, risk, pol, args, lines):
     if not ok:
         # 兄弟项目不是本仓 fork：代码搬过来只会变成垃圾文件，只能借鉴思路
         say(lines, f"{sha}: " + ("直搬失败" if mode == "cherry-pick" else "跳过直搬") + "，改试 LLM 适配。")
-        ok, mp = adapt(sha, pol["base"], branch, base_url, key, model, lines, mode)
+        ok, mp = adapt(sha, pol["base"], branch, base_url, key, model, lines, mode, src)
         if not ok:
             return 0
         how = "LLM 适配" if mode != "port" else "LLM 移植（跨语言重写）"
@@ -399,8 +469,7 @@ def land(src, mode, sha, why, risk, pol, args, lines):
         "--color", "ededed", "--description", "AutoBot 自动挑选的上游改动", check=False)
     title = f"autobot: 吸收 {src}@{sha} — {why}"[:120]
     body = (f"来源 `{src}@{sha}`，实施方式：**{how}**。\n\n"
-            f"- 理由：{why}\n- 风险：{risk}\n"
-            + (f"- 行为映射：{mp}\n" if mp else "")
+            + (mp + "\n\n" if mp else f"- 理由：{why}\n- 风险：{risk}\n")
             + "- `go build` / `go vet` / `go test ./...` 已通过；合并前请人工确认行为等价。\n")
     run("gh", "pr", "create", "--repo", os.environ["GITHUB_REPOSITORY"], "--base", pol["base"],
         "--head", branch, "--title", title, "--body", body, "--label", pol["label"])
