@@ -8,10 +8,12 @@ package scheduler
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // RunStreakBonusNow 对所有可用账号执行连登兑换 + 抽奖（幂等：locked/无次数自动跳过）。
@@ -41,18 +43,21 @@ func (s *Scheduler) RunStreakBonusNow() {
 
 // streakBonusAccount 单账号：补签保连登 → 礼包/补偿 → 兑换所有已解锁档位 → 抽完所有 chances。
 func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
-	// 0. 补签保连登：本月漏签且有补签卡则从最近一天往回补（连续天数一断就要重攒 7 天）。
-	s.makeupMissed(a)
-	// 0.5 礼包 + 补偿：两者都走「先查状态 → 待领才领」（见 compensation.go）。
-	// 盲领会把「无活动/已领过」打成假的「+0c」成功行，真失败反倒无痕。
-	s.claimGiftQuiet(a)
-	s.claimCompensationQuiet(a)
-
 	full, err := s.cfg.Upstream.GrowthStreakFull(a)
 	if err != nil {
 		log.Printf("WARN: streak-bonus %s: %v", logfmt.Label(a.UID, a.Nickname), err)
 		return
 	}
+	// 0. 补签保连登：本月漏签且有补签卡则从最近一天往回补（连续天数一断就要重攒 7 天）。
+	// 补签成功会改连签天数：此时 makeupMissed 返回重查后的快照；重查失败也用旧快照继续兑换。
+	full, err = s.makeupMissed(a, full)
+	if err != nil {
+		log.Printf("WARN: streak-bonus %s: 补签后重查连登失败（用旧快照继续）: %v", logfmt.Label(a.UID, a.Nickname), err)
+	}
+	// 0.5 礼包 + 补偿：两者都走「先查状态 → 待领才领」（见 compensation.go）。
+	// 盲领会把「无活动/已领过」打成假的「+0c」成功行，真失败反倒无痕。
+	s.claimGiftQuiet(a)
+	s.claimCompensationQuiet(a)
 	statuses := map[string]string{
 		"7d":  full.RedemptionStatus.Tier7dStatus,
 		"14d": full.RedemptionStatus.Tier14dStatus,
@@ -101,24 +106,56 @@ func compactJSON(raw json.RawMessage) string {
 }
 
 // makeupMissed 本月漏签且有补签卡时自动补签（保住连登连续天数）。
-// 从最近一天往回补（最近的最值钱），最多补到卡用光。
-// 上游拒绝即停：注册前的日子同样是 0 分，无法与漏签区分，只能由拒绝兜底。
-// 无卡 / 无漏签 / 查询失败均静默（不影响主流程）。
-func (s *Scheduler) makeupMissed(a *auth.Auth) {
-	broken, err := s.cfg.Upstream.HeatmapBrokenDates(a)
-	if err != nil || len(broken) == 0 {
-		return
+//
+// 待补日期只看活跃日历：`/streak` 的 `makeup_dates` 是**已补登历史**，把它当待办会
+// 反复提交补过的日子；日历缺项也不推测为断登。窗口 = max(当月 1 号（服务端 today）、
+// launch_date、活动起始日 2026-06-17) → today 之前，score == 0，排除已补登日期。
+//
+// 返回供后续兑换使用的连登快照：没补签就复用传入的 full（同一轮不打两次 /streak）；
+// 补过签则重查（连签天数变了，兑换档位要看最新值）。返回值始终非 nil，第二个返回值
+// 只在「补签后重查失败」时非空——调用方提醒后可用旧快照继续，别让补签拖垮兑换。
+//
+// 失败提醒：无卡/无漏签属常态，静默；查询失败、日历异常、上游拒绝都是硬失败，必须
+// 打 WARN（其他步骤成功不能盖掉它），并立即停止本轮——绝不继续凭猜测消耗补签卡。
+func (s *Scheduler) makeupMissed(a *auth.Auth, full *upstream.StreakFull) (*upstream.StreakFull, error) {
+	if full == nil {
+		return nil, errors.New("补签判断缺少连登状态")
 	}
-	full, err := s.cfg.Upstream.GrowthStreakFull(a)
-	if err != nil || full.MakeupCards.Balance <= 0 {
-		return
+	if full.MakeupCards.Balance <= 0 {
+		return full, nil // 无卡：不额外查日历（省一次只读请求）
 	}
+	hm, err := s.cfg.Upstream.GrowthHeatmap(a)
+	if err != nil {
+		log.Printf("WARN: streak-bonus %s: 补签判断查活跃日历失败: %v", logfmt.Label(a.UID, a.Nickname), err)
+		return full, nil
+	}
+	broken, err := upstream.MakeupCandidates(full, hm)
+	if err != nil {
+		// 数据异常时猜窗口就是凭猜测花卡：本轮停手并提醒。
+		log.Printf("WARN: streak-bonus %s: 补签日期不可判定（本轮不补）: %v", logfmt.Label(a.UID, a.Nickname), err)
+		return full, nil
+	}
+	used := 0
 	for i, n := 0, min(full.MakeupCards.Balance, len(broken)); i < n; i++ {
-		d := broken[len(broken)-1-i]
+		d := broken[i] // MakeupCandidates 已按「最近优先」排序
 		if err := s.cfg.Upstream.UseMakeupCard(a, d); err != nil {
+			if upstream.IsMakeupNotNeeded(err) {
+				// 查询后被客户端/另一轮补上：正常竞争，不是失败，也不再往前补。
+				log.Printf("streak-bonus %s: %s 已活跃或已补签，无需再补", logfmt.Label(a.UID, a.Nickname), d)
+				break
+			}
 			log.Printf("WARN: streak-bonus %s: 补签 %s 失败: %v", logfmt.Label(a.UID, a.Nickname), d, err)
-			return
+			break
 		}
+		used++
 		log.Printf("streak-bonus %s: ★ 已用补签卡补签 %s（保连登）", logfmt.Label(a.UID, a.Nickname), d)
 	}
+	if used == 0 {
+		return full, nil
+	}
+	latest, err := s.cfg.Upstream.GrowthStreakFull(a)
+	if err != nil {
+		return full, err
+	}
+	return latest, nil
 }

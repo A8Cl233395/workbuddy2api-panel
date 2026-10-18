@@ -41,6 +41,10 @@ jobs:
 
       - name: 安装 PI 并写入网关配置
         env:
+          # PI 需要原生 function calling；duck 只有文本协议模拟，模型肯不肯发调用全看运气
+          PI_BASE_URL: ${{ vars.PI_BASE_URL }}
+          PI_API_KEY: ${{ secrets.PI_API_KEY }}
+          PI_MODEL: ${{ vars.PI_MODEL }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
@@ -52,11 +56,14 @@ jobs:
           import json, os
           d = os.environ["PI_CODING_AGENT_DIR"]
           os.makedirs(d, exist_ok=True)
+          base = os.environ.get("PI_BASE_URL") or os.environ["LLM_BASE_URL"]
+          key = os.environ.get("PI_API_KEY") or os.environ["LLM_API_KEY"]
+          model = os.environ.get("PI_MODEL") or os.environ["LLM_MODEL"]
           cfg = {"providers": {"ci": {
-              "baseUrl": os.environ["LLM_BASE_URL"].rstrip("/"),
-              "apiKey": os.environ["LLM_API_KEY"],
+              "baseUrl": base.rstrip("/"),
+              "apiKey": key,
               "api": "openai-completions",
-              "models": [{"id": os.environ["LLM_MODEL"], "name": "ci",
+              "models": [{"id": model, "name": "ci",
                           "contextWindow": 128000, "maxTokens": 8192}]}}}
           open(os.path.join(d, "models.json"), "w").write(json.dumps(cfg))
           PY
@@ -74,6 +81,7 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           # 轮换模型：单个模型偶尔这一轮退化成聊天（回「我没有工具」），换一个再试
           PI_MODELS: ${{ vars.PI_MODELS }}
+          PI_NATIVE: "1"
           SRC: ${{ inputs.repo }}
           # PI 的 agent home 放 runner.temp：放 workspace 会被 git add -A 一起提交
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent

@@ -226,9 +226,13 @@ def pi_port(sha, lines, model):
             # PI 自带系统提示词 18.5KB + tools 共 22KB，超过上游约 19k 字符上限：
             # 会触发滚动摘要 → 撞 100s 边缘超时 504 → PI 收不到工具结果只能重试。
             # 极简提示词把整包压到约 3.3KB（实测）。
-            code, out = run("pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci", "--model", m,
-                            "--no-session", "--approve", "--no-context-files", "--no-skills",
-                            "--system-prompt", PI_SYSPROMPT, task, check=False, timeout=900)
+            argv = ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci", "--model", m,
+                    "--no-session", "--approve", "--no-context-files", "--no-skills"]
+            # 原生 tool calling 的端点用 PI 自带系统提示词；只有 duck 那种文本协议模拟
+            # 才需要极简提示词把整包压到 19k 字符以下。
+            if not os.environ.get("PI_NATIVE"):
+                argv += ["--system-prompt", PI_SYSPROMPT]
+            code, out = run(*argv, task, check=False, timeout=900)
         except subprocess.TimeoutExpired:
             code, out = 124, "超时（15 分钟）"
         changed = run("git", "status", "--porcelain", "-uall", check=False)[1].strip()
