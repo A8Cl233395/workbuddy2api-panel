@@ -72,6 +72,8 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+          # 轮换模型：单个模型偶尔这一轮退化成聊天（回「我没有工具」），换一个再试
+          PI_MODELS: ${{ vars.PI_MODELS }}
           SRC: ${{ inputs.repo }}
           # PI 的 agent home 放 runner.temp：放 workspace 会被 git add -A 一起提交
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent

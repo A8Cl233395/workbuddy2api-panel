@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -36,8 +37,10 @@ PATCH = "/tmp/autobot.patch"
 # 自动化产出的提交用机器人身份；就近用 -c 传给单条命令，**不写 git config**——
 # 写仓库配置会污染本机手写的提交（2026-10-18 事故：3 个提交变成了 autobot）。
 # 极简系统提示词：默认那份 18.5KB 会顶穿上游输入上限（见 pi_port）
-PI_SYSPROMPT = ("你是编码助手。用 read/bash/edit/write 工具直接改代码，不要询问许可、"
-                "不要只给计划；改完必须自己跑 go build/vet/test。")
+PI_SYSPROMPT = ("你是编码助手，手上确实有 bash/read/edit/write 四个工具，它们由本次请求的客户端注册并执行，"
+                "你输出调用后客户端会把结果回传。第一步就调用它们，不要询问许可、不要说没有工具、不要只给计划；"
+                "改完自己跑 go build/vet/test。")
+_pi_deadline = None  # 本轮 PI 时间预算的截止（秒），跨条目共享
 BOT = ("-c", "user.name=github-actions[bot]",
        "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com")
 
@@ -209,20 +212,34 @@ def pi_port(sha, lines, model):
         "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
         "最后一行输出：改了哪些文件 + 上游行为对应本仓的哪个 文件:函数。"
     )
-    try:
-        # PI 自带系统提示词有 18.5KB，加上 tools 共 22KB，超过上游约 19k 字符上限：
-        # 网关会触发滚动摘要 → 撞 100s 边缘超时返回 504 → PI 拿不到工具结果无限重试。
-        # 换极简系统提示词后整包约 3.3KB，同一任务一次就收口（实测）。
-        code, out = run("pi", "-p", "--provider", "ci", "--model", model,
-                        "--no-session", "--approve", "--no-context-files", "--no-skills",
-                        "--system-prompt", PI_SYSPROMPT,
-                        task, check=False, timeout=1500)
-    except subprocess.TimeoutExpired:
-        say(lines, f"  {sha}: PI 超时（25 分钟）")
-        return False
-    tail = " / ".join((out.strip().splitlines() or [""])[-3:])[:600]
-    say(lines, f"  {sha}: PI 退出码 {code}｜{tail}")
-    return code == 0
+    models = [m.strip() for m in (os.environ.get("PI_MODELS") or model).split(",") if m.strip()] or [model]
+    global _pi_deadline
+    if _pi_deadline is None:
+        _pi_deadline = time.time() + int(os.environ.get("PI_BUDGET_SEC") or 2700)
+    # 模型这一轮退化成聊天是常态（回「我没有工具」或只出计划），重试才是稳的办法。
+    for i in range(3):
+        if time.time() > _pi_deadline:
+            say(lines, f"  {sha}: 本轮 PI 时间预算已用完，跳过。")
+            return False
+        m = models[i % len(models)]
+        try:
+            # PI 自带系统提示词 18.5KB + tools 共 22KB，超过上游约 19k 字符上限：
+            # 会触发滚动摘要 → 撞 100s 边缘超时 504 → PI 收不到工具结果只能重试。
+            # 极简提示词把整包压到约 3.3KB（实测）。
+            code, out = run("pi", "-p", "--provider", "ci", "--model", m,
+                            "--no-session", "--approve", "--no-context-files", "--no-skills",
+                            "--system-prompt", PI_SYSPROMPT, task, check=False, timeout=900)
+        except subprocess.TimeoutExpired:
+            code, out = 124, "超时（15 分钟）"
+        changed = run("git", "status", "--porcelain", "-uall", check=False)[1].strip()
+        if code == 0 and changed:
+            say(lines, f"  {sha}: PI 产出改动（{m}）")
+            return True
+        tail = " / ".join((out.strip().splitlines() or [""])[-3:])[:400]
+        say(lines, f"  {sha}: 第 {i + 1} 次未产出（{m}，退出码 {code}）｜{tail}")
+        run("git", "reset", "-q", "--hard", "HEAD", check=False)
+        run("git", "clean", "-qfd", check=False)
+    return False
 
 
 def adapt(sha, base, branch, base_url, key, model, lines, mode="adapt"):
