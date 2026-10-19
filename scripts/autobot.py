@@ -43,26 +43,22 @@ def say(lines, text=""):
 
 
 def agent(task, timeout):
-    """跑一次 Hermes Agent（headless）。
+    """跑一次 Hermes（ACP 模式），思考/回复/工具调用全部实时回显。
 
-    429 是限流的常态，退避重试三次再认输。
+    shortcut: 不用 `hermes -z`——它设计上只打印最终答案（No tool previews），
+    看不到逐轮推理。ACP 提供 agent_thought_chunk 等事件流，日志即完整思考链。
 
-    shortcut: 用 bash tee 管道 + Popen.wait，不用 subprocess.run(capture_output)——
-    后者要读完管道才算完，agent 拉起的工具子进程继承管道后 kill 主进程也不返回
-    （实测挂到 job 超时 48 分钟）。tee 让过程实时进日志，killpg 杀整个进程组。
+    429 是限流的常态，退避重试三次再认输。用 Popen.wait 而不是
+    subprocess.run(capture_output)：后者要读完管道才算完，工具子进程继承管道后
+    kill 主进程也不返回（实测挂到 job 超时 48 分钟）。
     """
-    # CI 里没人点审批弹窗：--yolo 一律允许，--accept-hooks 让 hooks 不再询问
-    # --usage-file：一轮结束拿到 API 调用次数与 token，用来区分「慢」和「卡住」
-    cmd = ["hermes", "-z", task, "--yolo", "--accept-hooks",
-           "--usage-file", "/tmp/autobot-usage.json"]
+    # CI 里没人点审批弹窗：config 的 approvals.mode=off + HERMES_YOLO_MODE，
+    # ACP 客户端的 session/request_permission 也一律允许
+    cmd = [sys.executable, os.path.join(ROOT, "scripts", "acp_run.py"), task]
     tail = ""
-    hh = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     for attempt in range(3):
         log_f = "/tmp/autobot-agent.log"
-        # -z 只打印最终答案（No tool previews），过程靠跟随 agent.log 回显
-        pipe = (f"tail -F -n0 {shlex.quote(os.path.join(hh, 'logs', 'agent.log'))} 2>/dev/null & "
-                f"TP=$!; " + " ".join(shlex.quote(c) for c in cmd) +
-                f" 2>&1 | tee {shlex.quote(log_f)}; kill $TP 2>/dev/null")
+        pipe = " ".join(shlex.quote(c) for c in cmd) + " 2>&1 | tee " + shlex.quote(log_f)
         p = subprocess.Popen(
             ["bash", "-c", pipe], cwd=ROOT, stdin=subprocess.DEVNULL,
             start_new_session=True)
@@ -74,9 +70,6 @@ def agent(task, timeout):
             except ProcessLookupError:
                 pass
             p.wait(30)
-        if os.path.isfile("/tmp/autobot-usage.json"):
-            print("--- 本轮用量 ---", flush=True)
-            print(open("/tmp/autobot-usage.json", encoding="utf-8").read()[:400], flush=True)
         out = open(log_f, encoding="utf-8", errors="replace").read()
         if not out.strip():
             print("--- agent 无任何输出 ---", flush=True)
