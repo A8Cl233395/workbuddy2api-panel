@@ -15,7 +15,6 @@ import re
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 
 import yaml
@@ -57,10 +56,12 @@ def pi(task, timeout):
                  "--mode", "json", "-t", "read,write", task])
     tail = ""
     for attempt in range(3):
-        with tempfile.TemporaryFile("w+") as fh:
+        # 输出落文件再读：既要能看 agent 的思考过程，也要能超时后照常收尾
+        log_f = "/tmp/autobot-agent.log"
+        with open(log_f, "w", encoding="utf-8") as fh:
             p = subprocess.Popen(
-                cmd,
-                cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT, text=True,
+                cmd, cwd=ROOT, stdin=subprocess.DEVNULL,
+                stdout=fh, stderr=subprocess.STDOUT, text=True,
                 start_new_session=True)
             try:
                 p.wait(timeout=timeout)
@@ -70,8 +71,12 @@ def pi(task, timeout):
                 except ProcessLookupError:
                     pass
                 p.wait(30)
-            fh.seek(0)
-            out = fh.read()
+        out = open(log_f, encoding="utf-8", errors="replace").read()
+        if out.strip():
+            print("--- agent 输出（尾 60 行）---", flush=True)
+            print("\n".join(out.splitlines()[-60:]), flush=True)
+        else:
+            print("--- agent 无任何输出 ---", flush=True)
         code = 124 if (p.returncode is None or p.returncode < 0) else p.returncode
         keep = (out.strip().splitlines() or [""])[-3:]
         tail = " / ".join(keep)[:300]
