@@ -192,7 +192,8 @@ def implement(src, idea, lines):
     """
     up = up_clone(src)
     brief = adapt_brief(idea)
-    where = f"上游仓库 {src} 已 clone 在 `{up}`（只读参考）。\n" if up else ""
+    where = (f"上游仓库 {src} 已 clone 在 `{up}`（只读参考）。\n" if up else "") + \
+        "本仓 Go 文件清单（不要猜路径，就照这个读）：\n" + "\n".join(own_brief()) + "\n"
     plan_f = os.path.join(ROOT, "autobot-plan.md")
     patch = os.path.join(ROOT, "autobot.patch")
     for f in (plan_f, patch):
