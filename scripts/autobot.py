@@ -52,11 +52,17 @@ def agent(task, timeout):
     （实测挂到 job 超时 48 分钟）。tee 让过程实时进日志，killpg 杀整个进程组。
     """
     # CI 里没人点审批弹窗：--yolo 一律允许，--accept-hooks 让 hooks 不再询问
-    cmd = ["hermes", "-z", task, "--yolo", "--accept-hooks"]
+    # --usage-file：一轮结束拿到 API 调用次数与 token，用来区分「慢」和「卡住」
+    cmd = ["hermes", "-z", task, "--yolo", "--accept-hooks",
+           "--usage-file", "/tmp/autobot-usage.json"]
     tail = ""
+    hh = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     for attempt in range(3):
         log_f = "/tmp/autobot-agent.log"
-        pipe = " ".join(shlex.quote(c) for c in cmd) + " 2>&1 | tee " + shlex.quote(log_f)
+        # -z 只打印最终答案（No tool previews），过程靠跟随 agent.log 回显
+        pipe = (f"tail -F -n0 {shlex.quote(os.path.join(hh, 'logs', 'agent.log'))} 2>/dev/null & "
+                f"TP=$!; " + " ".join(shlex.quote(c) for c in cmd) +
+                f" 2>&1 | tee {shlex.quote(log_f)}; kill $TP 2>/dev/null")
         p = subprocess.Popen(
             ["bash", "-c", pipe], cwd=ROOT, stdin=subprocess.DEVNULL,
             start_new_session=True)
@@ -68,6 +74,9 @@ def agent(task, timeout):
             except ProcessLookupError:
                 pass
             p.wait(30)
+        if os.path.isfile("/tmp/autobot-usage.json"):
+            print("--- 本轮用量 ---", flush=True)
+            print(open("/tmp/autobot-usage.json", encoding="utf-8").read()[:400], flush=True)
         out = open(log_f, encoding="utf-8", errors="replace").read()
         if not out.strip():
             print("--- agent 无任何输出 ---", flush=True)
