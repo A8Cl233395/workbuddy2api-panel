@@ -43,21 +43,23 @@ def say(lines, text=""):
 
 
 def pi(task, timeout):
-    """跑一次 PI：cwd=本仓，默认系统提示词与上下文，不做裁剪。
+    """跑一次 agent（默认 PI；AGENT=hermes 时用 Hermes Agent）。
 
     429 是免费档的常态（并发一高就打满），退避重试三次再认输。
 
     shortcut: 用 Popen + 文件重定向而不是 subprocess.run(capture_output)，
-    因为 PI 拉起的工具子进程会继承 stdout 管道：kill 掉 pi 之后管道仍开着，
+    因为 agent 拉起的工具子进程会继承 stdout 管道：kill 掉主进程之后管道仍开着，
     run() 收尾时永远等下去（实测挂到 job 超时 48 分钟都没退）。
     """
+    cmd = (["hermes", "-z", task, "--yolo"] if os.environ.get("AGENT") == "hermes"
+           else ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
+                 "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
+                 "--mode", "json", "-t", "read,write", task])
     tail = ""
     for attempt in range(3):
         with tempfile.TemporaryFile("w+") as fh:
             p = subprocess.Popen(
-                ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
-                 "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
-                 "--mode", "json", "-t", "read,write", task],
+                cmd,
                 cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT, text=True,
                 start_new_session=True)
             try:

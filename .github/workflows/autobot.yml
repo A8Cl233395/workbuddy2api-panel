@@ -70,6 +70,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+
       - name: 安装 PI 并写入网关配置
         env:
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
@@ -167,6 +168,39 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装 Hermes Agent 并写入网关配置
+        env:
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          HERMES_HOME: ${{ runner.temp }}/hermes
+        run: |
+          pip install --quiet hermes-agent
+          mkdir -p "$HERMES_HOME"
+          python3 - <<'PY'
+          import os
+          m = os.environ["LLM_MODEL"]
+          api = os.environ["LLM_BASE_URL"].rstrip("/")
+          cfg = (
+              "providers:\n"
+              "  ci:\n"
+              "    name: ci\n"
+              f"    api: {api}\n"
+              f"    api_key: {os.environ['LLM_API_KEY']}\n"
+              "    transport: chat_completions\n"
+              f"    default_model: \"{m}\"\n"
+              "    models:\n"
+              f"      \"{m}\":\n"
+              "        context_length: 524288\n"
+              "model:\n"
+              f"  default: \"{m}\"\n"
+              "  provider: ci\n")
+          open(os.path.join(os.environ["HERMES_HOME"], "config.yaml"), "w").write(cfg)
+          PY
+          HERMES_HOME="$HERMES_HOME" hermes --version
       - name: 安装 PI 并写入网关配置
         env:
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
@@ -219,6 +253,8 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
           PI_SKIP_VERSION_CHECK: "1"
+          HERMES_HOME: ${{ runner.temp }}/hermes
+          AGENT: hermes
         run: python3 scripts/autobot.py --phase implement
       - name: 报告进 job summary
         if: always()
