@@ -55,6 +55,7 @@ def main():
             err.append(line.rstrip())
             return {}
 
+    done = False
     send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
           "params": {"protocolVersion": 1, "clientCapabilities": {}}})
     while True:
@@ -94,6 +95,7 @@ def main():
             picked = next((o for o in opts if "allow" in str(o.get("optionId", "")).lower()), opts[0])
             send({"jsonrpc": "2.0", "id": m["id"], "result": {"optionId": picked.get("optionId")}})
         elif mid == 3:
+            done = True
             print(f"\n\n[结束 stopReason={(m.get('result') or {}).get('stopReason')}]", flush=True)
             break
     try:
@@ -103,8 +105,8 @@ def main():
     p.wait(timeout=30)
     if err:
         print("[acp stderr 末 5 行] " + " / ".join(err[-5:])[:400], flush=True)
-    # 通道提前断开 = 失败，别让上层当成「跑完了但没产出」
-    return 1 if p.returncode not in (0, None) else 0
+    # 没收到 prompt 的 result 就算失败，别让上层当成「跑完了但没产出」
+    return 0 if done else 1
 
 
 if __name__ == "__main__":

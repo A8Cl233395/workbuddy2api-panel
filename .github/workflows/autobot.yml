@@ -85,7 +85,7 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           HERMES_HOME: ${{ runner.temp }}/hermes
         run: |
-          pip install --quiet hermes-agent pyyaml
+          pip install --quiet 'hermes-agent[acp]' pyyaml
           mkdir -p "$HERMES_HOME"
           python3 - <<'PY'
           import os
@@ -195,7 +195,7 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           HERMES_HOME: ${{ runner.temp }}/hermes
         run: |
-          pip install --quiet hermes-agent
+          pip install --quiet 'hermes-agent[acp]'
           mkdir -p "$HERMES_HOME"
           python3 - <<'PY'
           import os
