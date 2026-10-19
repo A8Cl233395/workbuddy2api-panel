@@ -173,7 +173,8 @@ jobs:
 
   implement:
     needs: analyze
-    if: always() && needs.analyze.result != 'cancelled'
+    # phase=analyze 只出报告；不挡的话验证一次就会多开一个 PR
+    if: always() && inputs.phase != 'analyze' && needs.analyze.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
