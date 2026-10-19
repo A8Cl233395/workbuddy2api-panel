@@ -37,7 +37,8 @@ jobs:
       - name: build
         run: |
           set -euo pipefail
-          # ponytail: 包结构跟上游一样；主程序 windows/linux × amd64/arm64。
+          # ponytail: 包结构跟上游一样；主程序 windows/linux/darwin × amd64/arm64
+          # （darwin 是 issue #23 的诉求：M 系列跑 arm64 原生，不套 Docker）。
           mkdir -p dist
           pack() {
             dir="dist/$1-$2"
@@ -47,7 +48,7 @@ jobs:
             python3 -c 'import os,sys,zipfile; n,d=sys.argv[1:]; z=zipfile.ZipFile(n,"w",zipfile.ZIP_DEFLATED); [z.write(os.path.join(d,f), f) for f in os.listdir(d)]; z.close()' \
               "dist/wb2api-panel-${VERSION}-$1-$2.zip" "$dir"
           }
-          for os in windows linux; do
+          for os in windows linux darwin; do
             bin=wb2api
             [ "$os" = windows ] && bin=wb2api.exe
             for arch in amd64 arm64; do
@@ -77,6 +78,16 @@ jobs:
         with:
           name: wb2api-panel-${{ env.VERSION }}-linux-arm64
           path: dist/linux-arm64
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb2api-panel-${{ env.VERSION }}-darwin-amd64
+          path: dist/darwin-amd64
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb2api-panel-${{ env.VERSION }}-darwin-arm64
+          path: dist/darwin-arm64
           if-no-files-found: error
 
       - name: release
