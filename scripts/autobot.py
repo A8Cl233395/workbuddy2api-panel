@@ -219,9 +219,20 @@ def finish(src):
         return False, "没有改动"
     tracked = set(run("git", "ls-tree", "-r", "--name-only", "HEAD").splitlines())
     changed = [l[3:] for l in status.splitlines()]
+    # agent 常把上游的 .bat/.sh 一起抄进来。这些本来就不该进本仓，删掉继续，
+    # 不要因为一条垃圾文件把整条实现丢掉（真丢过一整轮）。
     alien = [f for f in changed if f not in tracked and not f.endswith((".go", ".md"))]
     if alien:
-        return False, f"引入非 Go 文件 {alien[:5]}"
+        run("git", "reset", "-q", "HEAD", "--", *alien, check=False)
+        for f in alien:
+            if os.path.isfile(f):
+                os.remove(f)
+        changed = [f for f in changed if f not in alien]
+        if not changed:
+            return False, "清掉外星文件后没有改动"
+    status = run("git", "status", "--porcelain", "-uall", check=False)[1].strip()
+    if not status:
+        return False, "清掉外星文件后没有改动"
     # 只新增文件、没接线到既有代码 = 孤儿实现：能编译过测试，但行为没变
     if all(f not in tracked for f in changed):
         return False, f"只新增 {changed[:5]}、未接线到既有文件"
