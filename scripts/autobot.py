@@ -179,13 +179,12 @@ def implement(src, idea, lines):
         + "本仓是 Go 项目（当前目录）。上一轮分析的结论（只做这两段，别的不用管）：\n"
         f"---\n{adapt_brief(idea)}\n---\n\n"
         "在上面点名的文件:函数里实现，接进真实调用路径。\n"
-        "**第一个动作必须是 write/edit 工具调用；只读「适配」里点名的那几个文件，"
-        "不要遍历全仓**。禁止输出计划、分析或思路说明——"
-        "上一轮模型只写了「我先规划一下」就结束，一行代码没改。\n"
-        "要求：**必须回到已存在的 .go 文件里加调用点**——只新增文件不算完成，"
-        "CI 会检查改动里有没有已存在的 .go 文件，没有就整条丢弃（上一轮就这么被丢的）。"
-        "再加一条能钉住该行为的测试。"
-        "不要自己跑 go build/vet/test（CI 会在你退出后统一跑），把时间全花在改文件上。\n"
+        "**产出形式：只交一份 unified diff，不要动工作区里的任何文件。**\n"
+        "先 read「适配」里点名的那几个文件（不要遍历全仓），然后把改动写成标准 "
+        "unified diff 存进本仓根目录的 `autobot.patch`：\n"
+        "--- a/internal/foo.go\n+++ b/internal/foo.go\n@@ -10,6 +10,8 @@\n 上下文行\n-旧行\n+新行\n"
+        "只能修改**已存在**的文件；新增文件会被丢弃。测试请加进已存在的 _test.go。\n"
+        "禁止输出计划或思路说明，直接给 diff。不要自己跑 go build/vet/test。\n"
         "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
         "完成后在本仓根目录写 autobot-pr.md，只含这五行：\n"
         "问题: 上游解决什么问题，本仓有没有同类问题\n"
@@ -194,12 +193,42 @@ def implement(src, idea, lines):
         "优缺点: 好处与代价\n"
         "影响: 对现有行为/配置/性能的影响与风险\n"
     )
+    patch = os.path.join(ROOT, "autobot.patch")
+    if os.path.isfile(patch):
+        os.remove(patch)
     code, out = pi(task, int(os.environ.get("PI_IMPLEMENT_TIMEOUT") or 5400))
-    changed = run("git", "status", "--porcelain", "-uall", check=False)[1].strip()
-    if code != 0 or not changed:
+    if not os.path.isfile(patch):
         say(lines, f"{src}: 实现未产出（退出码 {code}）｜{out}")
         return False, ""
+    ok, why = apply_patch(patch)
+    os.remove(patch)
+    if not ok:
+        say(lines, f"{src}: patch 应用失败｜{why}")
+        return False, ""
+    if not run("git", "status", "--porcelain", "-uall", check=False)[1].strip():
+        say(lines, f"{src}: patch 应用后没有改动")
+        return False, ""
     return True, read_summary()
+
+
+def apply_patch(patch):
+    """模型手写的 unified diff 行号常常不准：--recount 重算 hunk 头，-C1 放宽上下文。
+
+    shortcut: 不做 fuzzy 合并，三次都失败就算这条候选没成（人看的报告还在）。
+    """
+    # 模型常把 diff 包在 ```diff 里或前面带说明，剥掉再喂 git apply
+    raw = open(patch, encoding="utf-8").read()
+    lines = [l for l in raw.splitlines() if not l.startswith("```")]
+    start = next((i for i, l in enumerate(lines) if l.startswith(("--- ", "diff --git"))), 0)
+    open(patch, "w", encoding="utf-8").write("\n".join(lines[start:]) + "\n")
+    err = ""
+    for extra in (["--recount", "-C1"], ["--recount", "-C1", "--3way"], ["--recount", "-C0"]):
+        r = subprocess.run(["git", "apply", *extra, patch], cwd=ROOT,
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            return True, ""
+        err = (r.stderr or r.stdout).strip()[:300]
+    return False, err
 
 
 def read_summary():
