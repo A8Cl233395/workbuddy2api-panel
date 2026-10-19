@@ -76,7 +76,7 @@ upstream:
   # 一个仓库一个 job：每个仓独立 clone、独立分析，互不影响
   shard_size: 1
   # 每轮最多真正落地几条（每条要起 agent 写代码、跑测试、开 PR）
-  land_max: 2
+  land_max: 1
 
 policy:
   base: main

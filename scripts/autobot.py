@@ -154,15 +154,33 @@ def analyze(src, lines):
     return rp
 
 
+def adapt_brief(idea):
+    """从报告里只取「功能」和「适配」两段。
+
+    shortcut: 整篇报告（含 200 行文件表）喂进去后模型会重新理解全仓，
+    60 分钟改不完一处（实测超时两次）。
+    """
+    want = []
+    for m in re.finditer(r"^#{2,4}\s*(.+)$", idea, re.M):
+        title = m.group(1)
+        start = m.end()
+        nxt = idea.find("\n#", start)
+        body = idea[start:nxt if nxt > 0 else len(idea)]
+        if "适配" in title or "功能" in title or "改动" in title:
+            want.append(f"{title}\n{body.strip()[:1800]}")
+    return "\n\n".join(want)[:4000] or idea[:2500]
+
+
 def implement(src, idea, lines):
     """按报告里的适配方案在本仓写 Go 实现。返回 (是否成功, PR 正文材料)。"""
     up = up_clone(src)
     task = (
         (f"上游仓库 {src} 已完整 clone 在 `{up}`（只读参考）。\n" if up else "")
-        + "本仓是 Go 项目（当前目录）。上一轮分析的结论：\n"
-        f"---\n{idea}\n---\n\n"
-        "在本仓用 Go 实现同样的行为，接进真实的调用路径。\n"
-        "**第一个动作必须是 write/edit 工具调用。禁止输出计划、分析或思路说明**——"
+        + "本仓是 Go 项目（当前目录）。上一轮分析的结论（只做这两段，别的不用管）：\n"
+        f"---\n{adapt_brief(idea)}\n---\n\n"
+        "在上面点名的文件:函数里实现，接进真实调用路径。\n"
+        "**第一个动作必须是 write/edit 工具调用；只读「适配」里点名的那几个文件，"
+        "不要遍历全仓**。禁止输出计划、分析或思路说明——"
         "上一轮模型只写了「我先规划一下」就结束，一行代码没改。\n"
         "要求：至少修改一个既有 .go 文件并补一条能钉住该行为的测试。"
         "不要自己跑 go build/vet/test（CI 会在你退出后统一跑），把时间全花在改文件上。\n"
@@ -174,7 +192,7 @@ def implement(src, idea, lines):
         "优缺点: 好处与代价\n"
         "影响: 对现有行为/配置/性能的影响与风险\n"
     )
-    code, out = pi(task, int(os.environ.get("PI_IMPLEMENT_TIMEOUT") or 3600))
+    code, out = pi(task, int(os.environ.get("PI_IMPLEMENT_TIMEOUT") or 5400))
     changed = run("git", "status", "--porcelain", "-uall", check=False)[1].strip()
     if code != 0 or not changed:
         say(lines, f"{src}: 实现未产出（退出码 {code}）｜{out}")
