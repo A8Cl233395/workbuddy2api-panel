@@ -50,7 +50,8 @@ def pi(task, timeout):
     因为 agent 拉起的工具子进程会继承 stdout 管道：kill 掉主进程之后管道仍开着，
     run() 收尾时永远等下去（实测挂到 job 超时 48 分钟都没退）。
     """
-    cmd = (["hermes", "-z", task, "--yolo"] if os.environ.get("AGENT") == "hermes"
+    # CI 里没人点审批弹窗，--yolo（一律允许）+ --accept-hooks（hooks 不再问）必须都给
+    cmd = (["hermes", "-z", task, "--yolo", "--accept-hooks"] if os.environ.get("AGENT") == "hermes"
            else ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
                  "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
                  "--mode", "json", "-t", "read,write", task])

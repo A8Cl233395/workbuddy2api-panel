@@ -224,6 +224,18 @@ jobs:
           PY
           pi --list-models
       - run: python3 -m pip install --quiet pyyaml
+      - name: Hermes 自检
+        # 首次运行可能弹交互式向导，CI 里没人点就卡到超时；5 分钟内先问清楚
+        timeout-minutes: 6
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes
+        run: |
+          rm -f /tmp/hermes-selftest.txt
+          timeout 240 hermes -z "用 write 工具把 exactly-ok 写进 /tmp/hermes-selftest.txt，然后结束。不要做别的。" \
+            --yolo --accept-hooks < /dev/null || echo "退出码 $?"
+          echo "--- 产物:"; cat /tmp/hermes-selftest.txt 2>/dev/null || echo "(没有产物)"
+          test -f /tmp/hermes-selftest.txt
+
       - uses: actions/download-artifact@v4
         if: inputs.reports_run == ''
         with:
