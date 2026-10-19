@@ -184,31 +184,52 @@ def adapt_brief(idea):
 
 
 def implement(src, idea, lines):
-    """按报告里的适配方案在本仓写 Go 实现。返回 (是否成功, PR 正文材料)。"""
+    """两次短调用：先出改动方案，再出 unified diff。
+
+    shortcut: 一次调用干完「读代码→判断→写实现→写测试→接线」时 7 轮全败
+    （只写计划/超时/不接线/抄垃圾/判定无需改动），单次失败要 90 分钟；
+    拆成 10 分钟 + 20 分钟两段，失败便宜，方案段还能给 diff 段当输入。
+    """
     up = up_clone(src)
-    task = (
-        (f"上游仓库 {src} 已完整 clone 在 `{up}`（只读参考）。\n" if up else "")
-        + "本仓是 Go 项目（当前目录）。上一轮分析的结论（只做这两段，别的不用管）：\n"
-        f"---\n{adapt_brief(idea)}\n---\n\n"
-        "在上面点名的文件:函数里实现，接进真实调用路径。\n"
-        "**产出形式：只交一份 unified diff，不要动工作区里的任何文件。**\n"
-        "先 read「适配」里点名的那几个文件（不要遍历全仓），然后把改动写成标准 "
-        "unified diff 存进本仓根目录的 `autobot.patch`：\n"
+    brief = adapt_brief(idea)
+    where = f"上游仓库 {src} 已 clone 在 `{up}`（只读参考）。\n" if up else ""
+    plan_f = os.path.join(ROOT, "autobot-plan.md")
+    patch = os.path.join(ROOT, "autobot.patch")
+    for f in (plan_f, patch):
+        if os.path.isfile(f):
+            os.remove(f)
+
+    # 第一段：只出方案，不许写其它文件
+    code, out = pi(
+        where
+        + "本仓是 Go 项目（当前目录）。分析结论：\n"
+        f"---\n{brief}\n---\n\n"
+        "只做一件事：read「适配」里点名的那几个文件，然后把改动方案写进 "
+        f"`{plan_f}`——要改哪个 文件:函数、改成什么、测试加在哪，每处给出准确的位置与代码。\n"
+        "不要写实现文件、不要写 diff、不要跑 go build。禁止输出计划说明，直接写文件。\n",
+        int(os.environ.get("PI_PLAN_TIMEOUT") or 600))
+    if not os.path.isfile(plan_f):
+        say(lines, f"{src}: 改动方案未产出（退出码 {code}）｜{out}")
+        return False, ""
+    plan_txt = open(plan_f, encoding="utf-8").read()[:8000]
+    os.remove(plan_f)
+
+    # 第二段：按方案出 diff
+    code, out = pi(
+        where
+        + "本仓是 Go 项目（当前目录）。要落地的改动方案：\n"
+        f"---\n{plan_txt}\n---\n\n"
+        "把它写成标准 unified diff 存进本仓根目录的 `autobot.patch`，不要动工作区任何文件：\n"
         "--- a/internal/foo.go\n+++ b/internal/foo.go\n@@ -10,6 +10,8 @@\n 上下文行\n-旧行\n+新行\n"
-        "只能修改**已存在**的文件；新增文件会被丢弃。测试请加进已存在的 _test.go。\n"
-        "禁止输出计划或思路说明，直接给 diff。不要自己跑 go build/vet/test。\n"
+        "**只能修改已存在的文件**；测试加进已存在的 _test.go。禁止输出说明，直接写 patch。\n"
         "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
-        "完成后在本仓根目录写 autobot-pr.md，只含这五行：\n"
+        f"写完后在同一目录写 autobot-pr.md，只含这五行：\n"
         "问题: 上游解决什么问题，本仓有没有同类问题\n"
         "改动: 你做了什么\n"
         "位置: 本仓改到的 文件:函数\n"
         "优缺点: 好处与代价\n"
-        "影响: 对现有行为/配置/性能的影响与风险\n"
-    )
-    patch = os.path.join(ROOT, "autobot.patch")
-    if os.path.isfile(patch):
-        os.remove(patch)
-    code, out = pi(task, int(os.environ.get("PI_IMPLEMENT_TIMEOUT") or 5400))
+        "影响: 对现有行为/配置/性能的影响与风险\n",
+        int(os.environ.get("PI_IMPLEMENT_TIMEOUT") or 1800))
     if not os.path.isfile(patch):
         say(lines, f"{src}: 实现未产出（退出码 {code}）｜{out}")
         return False, ""
