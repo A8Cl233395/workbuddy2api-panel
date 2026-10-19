@@ -73,6 +73,10 @@ def main():
             if not sid:
                 print(f"[session/new 失败: {m.get('error')}]", flush=True)
                 break
+            # dont_ask：文件编辑不再弹审批（CI 里没人点，默认 ask 会被当拒绝）
+            send({"jsonrpc": "2.0", "id": 4, "method": "session/set_mode",
+                  "params": {"sessionId": sid, "modeId": "dont_ask"}})
+        elif mid == 4:
             send({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
                   "params": {"sessionId": sid,
                              "prompt": [{"type": "text", "text": prompt}]}})
@@ -90,10 +94,14 @@ def main():
             elif kind == "tool_call_update" and u.get("status"):
                 print(f"[tool {u.get('status')}]", flush=True)
         elif method == "session/request_permission":
-            # yolo 下不该出现；真出现就一律允许，CI 里没人能点
+            # yolo 下本该没有；真出现就一律允许。响应必须是
+            # {"outcome":{"outcome":"selected","optionId":..}} —— 少这层包装
+            # Hermes 会当成「被拒绝」，文件写入直接失败（真踩过）。
             opts = (m["params"].get("options") or [{}])
             picked = next((o for o in opts if "allow" in str(o.get("optionId", "")).lower()), opts[0])
-            send({"jsonrpc": "2.0", "id": m["id"], "result": {"optionId": picked.get("optionId")}})
+            send({"jsonrpc": "2.0", "id": m["id"],
+                  "result": {"outcome": {"outcome": "selected",
+                                         "optionId": picked.get("optionId")}}})
         elif mid == 3:
             done = True
             print(f"\n\n[结束 stopReason={(m.get('result') or {}).get('stopReason')}]", flush=True)
