@@ -4,6 +4,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -72,5 +75,75 @@ assert(start>=0&&end>start);
 	}
 	if out, err := exec.Command(node, path, "app.js").CombinedOutput(); err != nil {
 		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
+// TestAutoActionsSyncWithFrontend 钉住「后端 autoActions」与「前端 AUTO_TASKS」的键集合一致。
+//
+// 为什么要这条：任务中心是否把某任务渲染成「一键完成」，由前端 AUTO_TASKS[code] 决定
+// （app.js 的 taskRowPresentation），而点了之后能不能跑由后端 autoActions 决定。
+// 只在一边登记就是静默故障，两边都看不出来：
+//   - 只在后端：按钮不出现，任务看着"不支持自动化"；
+//   - 只在前端：按钮出现了，点了后端返回无动作。
+//
+// 本测试纯静态比对：不打上游、不碰账号、不依赖 node。
+func TestAutoActionsSyncWithFrontend(t *testing.T) {
+	// 后端：autoActions 表的真实任务码。("(批量接受)" 之类是进度事件标签，不在表里)
+	back := map[string]bool{}
+	for _, a := range autoActions {
+		back[a.TaskCode] = true
+	}
+	if len(back) == 0 {
+		t.Fatal("autoActions 为空，测试失去意义")
+	}
+
+	// 前端：从 app.js 切出 `const AUTO_TASKS = { ... };` 块，抠出 '键': 形式的键名。
+	src, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(src)
+	const head = "const AUTO_TASKS = {"
+	i := strings.Index(text, head)
+	if i < 0 {
+		t.Fatalf("app.js 里找不到 %q（表格被改名或移走了？）", head)
+	}
+	body := text[i+len(head):]
+	// 必须找到闭合的 "};" 才切；找不到就立刻失败——否则 body 会退化成"表头到文件末尾"
+	// 的全部代码，正则可能抓到后面其他表/对象里的 'key': 造成假报错。
+	j := strings.Index(body, "\n};")
+	if j < 0 {
+		t.Fatal("AUTO_TASKS 块没有正常的 }; 结尾，无法定位表格边界（格式被改动？）")
+	}
+	body = body[:j]
+	keyRE := regexp.MustCompile(`(?m)^\s*'([^']+)':`)
+	front := map[string]bool{}
+	for _, m := range keyRE.FindAllStringSubmatch(body, -1) {
+		front[m[1]] = true
+	}
+	// 防假绿：正则一旦失效（比如表格改用双引号、或一键写成一行），提取结果会变成空集，
+	// 那时"两边都没差异"是假象。用下限兜住。
+	if len(front) < 20 {
+		t.Fatalf("AUTO_TASKS 只解析出 %d 个键（正则失效或表格换写法了？）", len(front))
+	}
+
+	var missing, extra []string
+	for code := range back {
+		if !front[code] {
+			missing = append(missing, code)
+		}
+	}
+	for code := range front {
+		if !back[code] {
+			extra = append(extra, code)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+	if len(missing) > 0 {
+		t.Errorf("后端 autoActions 有、前端 AUTO_TASKS 缺 %v —— 任务中心不会渲染「一键完成」按钮", missing)
+	}
+	if len(extra) > 0 {
+		t.Errorf("前端 AUTO_TASKS 有、后端 autoActions 缺 %v —— 按钮能点但后端会返回无动作", extra)
 	}
 }
