@@ -71,29 +71,39 @@ jobs:
         with:
           node-version: "22"
 
-      - name: 安装 PI 并写入网关配置
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装 Hermes Agent 并写入网关配置
         env:
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
-          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
+          HERMES_HOME: ${{ runner.temp }}/hermes
         run: |
-          npm i -g @earendil-works/pi-coding-agent
+          pip install --quiet hermes-agent pyyaml
+          mkdir -p "$HERMES_HOME"
           python3 - <<'PY'
-          import json, os
-          d = os.environ["PI_CODING_AGENT_DIR"]
-          os.makedirs(d, exist_ok=True)
-          cfg = {"providers": {"ci": {
-              "baseUrl": os.environ["LLM_BASE_URL"].rstrip("/"),
-              "apiKey": os.environ["LLM_API_KEY"],
-              "api": "openai-completions",
-              "models": [{"id": os.environ["LLM_MODEL"], "name": "ci",
-                          "contextWindow": int(os.environ.get("LLM_CONTEXT") or 524288),
-                          "maxTokens": int(os.environ.get("LLM_MAX_TOKENS") or 32768)}]}}}
-          open(os.path.join(d, "models.json"), "w").write(json.dumps(cfg))
+          import os
+          m = os.environ["LLM_MODEL"]
+          api = os.environ["LLM_BASE_URL"].rstrip("/")
+          cfg = (
+              "providers:\n"
+              "  ci:\n"
+              "    name: ci\n"
+              f"    api: {api}\n"
+              f"    api_key: {os.environ['LLM_API_KEY']}\n"
+              "    transport: chat_completions\n"
+              f"    default_model: \"{m}\"\n"
+              "    models:\n"
+              f"      \"{m}\":\n"
+              "        context_length: 524288\n"
+              "model:\n"
+              f"  default: \"{m}\"\n"
+              "  provider: ci\n")
+          open(os.path.join(os.environ["HERMES_HOME"], "config.yaml"), "w").write(cfg)
           PY
-          pi --list-models
-      - run: python3 -m pip install --quiet pyyaml
+          hermes --version
       - name: 探活模型网关
         # 网关/模型名不通时会在 agent 里挂满 25 分钟才超时，这里先 90 秒问一次
         env:
@@ -106,26 +116,24 @@ jobs:
             -d "{\"model\":\"$LLM_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}")
           echo "HTTP $code"; head -c 400 /tmp/probe.json; echo
           [ "$code" = "200" ] || { echo "网关不可用：$LLM_BASE_URL / $LLM_MODEL"; exit 1; }
-          # PI 走流式；流式挂住时 agent 会静默等到超时，一个字都不打印
+          # agent 走流式；流式挂住时会静默等到超时，一个字都不打印
           stream=$(curl -sN -m 60 -X POST "$LLM_BASE_URL/chat/completions" \
             -H "Authorization: Bearer $LLM_API_KEY" -H 'Content-Type: application/json' \
             -d "{\"model\":\"$LLM_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":true,\"max_tokens\":4}" | head -c 300)
           echo "流式: $stream"
           case "$stream" in *data:*) ;; *) echo "流式无输出，agent 会一直挂着"; exit 1;; esac
 
-      - name: PI 自检
-        # agent 静默 25 分钟时无法区分「网关慢」和「PI 根本跑不起来」，先花 4 分钟问清楚
-        timeout-minutes: 5
+      - name: Hermes 自检
+        # agent 静默超时时分不清是网关慢还是 agent 跑不起来，先花 5 分钟问清楚
+        timeout-minutes: 6
         env:
-          LLM_MODEL: ${{ vars.LLM_MODEL }}
-          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
-          PI_SKIP_VERSION_CHECK: "1"
+          HERMES_HOME: ${{ runner.temp }}/hermes
         run: |
-          rm -f /tmp/pi-selftest.txt
-          timeout 240 pi -p --provider ci --model "$LLM_MODEL" --no-session --approve \
-            "用 write 工具把 exactly-ok 写进 /tmp/pi-selftest.txt，然后结束。不要做别的。" || echo "PI 退出码 $?"
-          echo "--- 产物:"; cat /tmp/pi-selftest.txt 2>/dev/null || echo "(没有产物)"
-          test -f /tmp/pi-selftest.txt
+          rm -f /tmp/hermes-selftest.txt
+          timeout 240 hermes -z "用 write 工具把 exactly-ok 写进 /tmp/hermes-selftest.txt，然后结束。不要做别的。" \
+            --yolo --accept-hooks < /dev/null || echo "退出码 $?"
+          echo "--- 产物:"; cat /tmp/hermes-selftest.txt 2>/dev/null || echo "(没有产物)"
+          test -f /tmp/hermes-selftest.txt
 
       - name: 分析这一片
         # 指定单仓时只有第 0 片干活，其余跳过（job 级 if 引用不了 matrix，只能放这里）
@@ -134,8 +142,8 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
-          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
-          PI_SKIP_VERSION_CHECK: "1"
+          HERMES_HOME: ${{ runner.temp }}/hermes
+          AGENT: hermes
           SRC: ${{ inputs.repo }}
         run: |
           if [ -n "$SRC" ]; then
@@ -201,29 +209,6 @@ jobs:
           open(os.path.join(os.environ["HERMES_HOME"], "config.yaml"), "w").write(cfg)
           PY
           HERMES_HOME="$HERMES_HOME" hermes --version
-      - name: 安装 PI 并写入网关配置
-        env:
-          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_MODEL: ${{ vars.LLM_MODEL }}
-          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
-        run: |
-          npm i -g @earendil-works/pi-coding-agent
-          python3 - <<'PY'
-          import json, os
-          d = os.environ["PI_CODING_AGENT_DIR"]
-          os.makedirs(d, exist_ok=True)
-          cfg = {"providers": {"ci": {
-              "baseUrl": os.environ["LLM_BASE_URL"].rstrip("/"),
-              "apiKey": os.environ["LLM_API_KEY"],
-              "api": "openai-completions",
-              "models": [{"id": os.environ["LLM_MODEL"], "name": "ci",
-                          "contextWindow": int(os.environ.get("LLM_CONTEXT") or 524288),
-                          "maxTokens": int(os.environ.get("LLM_MAX_TOKENS") or 32768)}]}}}
-          open(os.path.join(d, "models.json"), "w").write(json.dumps(cfg))
-          PY
-          pi --list-models
-      - run: python3 -m pip install --quiet pyyaml
       - name: Hermes 自检
         # 首次运行可能弹交互式向导，CI 里没人点就卡到超时；5 分钟内先问清楚
         timeout-minutes: 6
@@ -263,8 +248,6 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
-          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
-          PI_SKIP_VERSION_CHECK: "1"
           HERMES_HOME: ${{ runner.temp }}/hermes
           AGENT: hermes
         run: python3 scripts/autobot.py --phase implement

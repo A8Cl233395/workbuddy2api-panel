@@ -41,20 +41,17 @@ def say(lines, text=""):
     print(text, flush=True)
 
 
-def pi(task, timeout):
-    """跑一次 agent（默认 PI；AGENT=hermes 时用 Hermes Agent）。
+def agent(task, timeout):
+    """跑一次 Hermes Agent（headless）。
 
-    429 是免费档的常态（并发一高就打满），退避重试三次再认输。
+    429 是限流的常态，退避重试三次再认输。
 
     shortcut: 用 Popen + 文件重定向而不是 subprocess.run(capture_output)，
     因为 agent 拉起的工具子进程会继承 stdout 管道：kill 掉主进程之后管道仍开着，
     run() 收尾时永远等下去（实测挂到 job 超时 48 分钟都没退）。
     """
-    # CI 里没人点审批弹窗，--yolo（一律允许）+ --accept-hooks（hooks 不再问）必须都给
-    cmd = (["hermes", "-z", task, "--yolo", "--accept-hooks"] if os.environ.get("AGENT") == "hermes"
-           else ["pi", "-p", "--provider", os.environ.get("PI_PROVIDER") or "ci",
-                 "--model", os.environ["LLM_MODEL"], "--no-session", "--approve",
-                 "--mode", "json", "-t", "read,write", task])
+    # CI 里没人点审批弹窗：--yolo 一律允许，--accept-hooks 让 hooks 不再询问
+    cmd = ["hermes", "-z", task, "--yolo", "--accept-hooks"]
     tail = ""
     for attempt in range(3):
         # 输出落文件再读：既要能看 agent 的思考过程，也要能超时后照常收尾
@@ -166,7 +163,7 @@ def analyze(src, lines):
         "优缺点: 这个改法的好处与代价\n"
         "影响: 对现有行为/配置/性能的影响与风险\n"
     )
-    code, out = pi(task, int(os.environ.get("PI_ANALYZE_TIMEOUT") or 1500))
+    code, out = agent(task, int(os.environ.get("AGENT_ANALYZE_TIMEOUT") or 1800))
     if not os.path.isfile(rp):
         say(lines, f"{src}: agent 未产出报告（退出码 {code}）｜{out}")
         return ""
@@ -209,14 +206,14 @@ def implement(src, idea, lines):
             os.remove(f)
 
     # 第一段：只出方案，不许写其它文件
-    code, out = pi(
+    code, out = agent(
         where
         + "本仓是 Go 项目（当前目录）。分析结论：\n"
         f"---\n{brief}\n---\n\n"
         "只做一件事：read「适配」里点名的那几个文件，然后把改动方案写进 "
         f"`{plan_f}`——要改哪个 文件:函数、改成什么、测试加在哪，每处给出准确的位置与代码。\n"
         "不要写实现文件、不要写 diff、不要跑 go build。禁止输出计划说明，直接写文件。\n",
-        int(os.environ.get("PI_PLAN_TIMEOUT") or 1800))
+        int(os.environ.get("AGENT_PLAN_TIMEOUT") or 1800))
     if not os.path.isfile(plan_f):
         say(lines, f"{src}: 改动方案未产出（退出码 {code}）｜{out}")
         return False, ""
@@ -224,7 +221,7 @@ def implement(src, idea, lines):
     os.remove(plan_f)
 
     # 第二段：按方案出 diff
-    code, out = pi(
+    code, out = agent(
         where
         + "本仓是 Go 项目（当前目录）。要落地的改动方案：\n"
         f"---\n{plan_txt}\n---\n\n"
@@ -238,7 +235,7 @@ def implement(src, idea, lines):
         "位置: 本仓改到的 文件:函数\n"
         "优缺点: 好处与代价\n"
         "影响: 对现有行为/配置/性能的影响与风险\n",
-        int(os.environ.get("PI_IMPLEMENT_TIMEOUT") or 1800))
+        int(os.environ.get("AGENT_IMPLEMENT_TIMEOUT") or 1800))
     if not os.path.isfile(patch):
         say(lines, f"{src}: 实现未产出（退出码 {code}）｜{out}")
         return False, ""
