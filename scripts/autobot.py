@@ -142,26 +142,25 @@ def analyze(src, lines):
     os.makedirs(REPORT_DIR, exist_ok=True)
     rp = report_path(src)
     files, logs, readme = upstream_brief(up)
+    # 材料写文件、prompt 只留指令：十几 KB 的 prompt 会让 agent 静默超时
+    up_f = "/tmp/autobot-upstream.md"
+    with open(up_f, "w", encoding="utf-8") as f:
+        f.write(f"# 上游仓库 {src}（clone 在 {up}，只读参考）\n\n"
+                "## 文件清单（最多 6 个，挑最能说明差异的）\n" + "\n".join(files) + "\n\n"
+                "## 最近提交\n" + logs + "\n")
+        if readme:
+            f.write("\n## README 摘要\n" + readme + "\n")
+        f.write("\n## 本仓 Go 文件清单（写「差异」时对照）\n" + "\n".join(own_brief()) + "\n")
     task = (
-        f"上游仓库 {src} 已 clone 在 `{up}`（只读参考）。本仓是 WorkBuddy 的 Go 网关（当前目录）。\n"
+        f"先读 {up_f}。本仓是 WorkBuddy 的 Go 网关（当前目录）。\n"
         "任务：分析这个上游仓库与本仓的实现差异——它有哪些本仓还没有的功能、修过的 bug、"
-        "更好的实现，哪些值得借鉴，以及要怎么适配到本仓。\n"
-        f"上游已有清单，不用自己遍历：\n文件（{len(files)} 个，最多）：\n"
-        + "\n".join(files) + "\n最近提交：\n" + logs
-        + ("\nREADME 摘要：\n" + readme if readme else "")
-        + "\n**最多读 6 个文件**（挑这 6 个里最能说明差异的），20 分钟内必须写出报告。\n"
-        "本仓 Go 文件清单（写「差异」时对照）：\n" + "\n".join(own_brief()) + "\n"
-        "**「差异」一行必须点名本仓的 文件:函数**。若读了本仓代码确认已有等价实现，"
-        "就写「本仓已有：<文件:函数>」并把值得度降到 0-1，不要报 3。\n"
-        "（上一轮报 3 的那条，implement 一读代码就发现本仓早就有了，白跑一整轮。）\n"
-        "只读：不要修改本仓任何文件、不要 commit、不要 push。\n"
-        f"把结论写进 `{rp}`，严格用这个格式：\n"
-        "值得度: 0-3（0=没有可借鉴；3=本仓明确缺这个能力）\n"
-        "功能: 上游有什么，解决什么问题\n"
-        "差异: 本仓现状（文件:函数）对比上游\n"
-        "适配: 要改本仓哪个 文件:函数，怎么改（能给 Go 代码草图更好）\n"
-        "优缺点: 这个改法的好处与代价\n"
-        "影响: 对现有行为/配置/性能的影响与风险\n"
+        "更好的实现，哪些值得借鉴，要怎么适配到本仓。\n"
+        "20 分钟内必须写出报告。只读，不要修改本仓任何文件。\n"
+        "「差异」一行必须点名本仓的 文件:函数；若确认本仓已有等价实现，"
+        "写「本仓已有：<文件:函数>」并把值得度降到 0-1，不要报 3。\n"
+        f"结论写进 {rp}，严格用这个格式：\n"
+        "值得度: 0-3\n功能: 上游有什么，解决什么问题\n差异: 本仓现状（文件:函数）对比上游\n"
+        "适配: 要改本仓哪个 文件:函数，怎么改\n优缺点: 好处与代价\n影响: 行为/配置/性能风险\n"
     )
     code, out = agent(task, int(os.environ.get("AGENT_ANALYZE_TIMEOUT") or 1800))
     if not os.path.isfile(rp):
@@ -194,11 +193,17 @@ def implement(src, idea, lines):
     shortcut: 一次调用干完「读代码→判断→写实现→写测试→接线」时 7 轮全败
     （只写计划/超时/不接线/抄垃圾/判定无需改动），单次失败要 90 分钟；
     拆成 10 分钟 + 20 分钟两段，失败便宜，方案段还能给 diff 段当输入。
+
+    材料一律写文件、prompt 只留几句：十几 KB 的 prompt 让 agent 30 分钟零输出，
+    而同样环境下的短 prompt 4 分钟就能跑完（自检）。
     """
     up = up_clone(src)
-    brief = adapt_brief(idea)
-    where = (f"上游仓库 {src} 已 clone 在 `{up}`（只读参考）。\n" if up else "") + \
-        "本仓 Go 文件清单（不要猜路径，就照这个读）：\n" + "\n".join(own_brief()) + "\n"
+    brief_f = "/tmp/autobot-brief.md"
+    with open(brief_f, "w", encoding="utf-8") as f:
+        f.write(f"# 上游仓库\n{src} clone 在 {up}（只读参考）\n\n"
+                f"# 分析结论\n{adapt_brief(idea)}\n\n"
+                "# 本仓 Go 文件清单（不要猜路径，就照这个读）\n"
+                + "\n".join(own_brief()) + "\n")
     plan_f = os.path.join(ROOT, "autobot-plan.md")
     patch = os.path.join(ROOT, "autobot.patch")
     for f in (plan_f, patch):
@@ -207,34 +212,26 @@ def implement(src, idea, lines):
 
     # 第一段：只出方案，不许写其它文件
     code, out = agent(
-        where
-        + "本仓是 Go 项目（当前目录）。分析结论：\n"
-        f"---\n{brief}\n---\n\n"
-        "只做一件事：read「适配」里点名的那几个文件，然后把改动方案写进 "
-        f"`{plan_f}`——要改哪个 文件:函数、改成什么、测试加在哪，每处给出准确的位置与代码。\n"
-        "不要写实现文件、不要写 diff、不要跑 go build。禁止输出计划说明，直接写文件。\n",
+        f"先读 {brief_f}。本仓是 Go 项目（当前目录）。\n"
+        f"把改动方案写进 {plan_f}：要改哪个 文件:函数、改成什么、测试加在哪，"
+        "每处给出准确位置与代码。\n"
+        "不要写实现文件、不要写 diff、不要跑 go build。直接写文件，不要回说明。\n",
         int(os.environ.get("AGENT_PLAN_TIMEOUT") or 1800))
     if not os.path.isfile(plan_f):
-        say(lines, f"{src}: 改动方案未产出（退出码 {code}）｜{out}")
+        say(lines, f"{src}: 改动方案未产出（退出码 {code}，prompt 材料已落文件）｜{out}")
         return False, ""
-    plan_txt = open(plan_f, encoding="utf-8").read()[:8000]
+    plan_in = "/tmp/autobot-plan-input.md"
+    with open(plan_in, "w", encoding="utf-8") as f:
+        f.write(open(plan_f, encoding="utf-8").read()[:12000])
     os.remove(plan_f)
 
     # 第二段：按方案出 diff
     code, out = agent(
-        where
-        + "本仓是 Go 项目（当前目录）。要落地的改动方案：\n"
-        f"---\n{plan_txt}\n---\n\n"
-        "把它写成标准 unified diff 存进本仓根目录的 `autobot.patch`，不要动工作区任何文件：\n"
+        f"读 {plan_in}（改动方案）和 {brief_f}（本仓文件清单）。本仓是 Go 项目（当前目录）。\n"
+        f"把它写成标准 unified diff 存进 {patch}，不要动工作区任何文件：\n"
         "--- a/internal/foo.go\n+++ b/internal/foo.go\n@@ -10,6 +10,8 @@\n 上下文行\n-旧行\n+新行\n"
-        "**只能修改已存在的文件**；测试加进已存在的 _test.go。禁止输出说明，直接写 patch。\n"
-        "不要 git commit、不要 push；不要改 .github/workflows、AGENTS.md、config.example.json。\n"
-        f"写完后在同一目录写 autobot-pr.md，只含这五行：\n"
-        "问题: 上游解决什么问题，本仓有没有同类问题\n"
-        "改动: 你做了什么\n"
-        "位置: 本仓改到的 文件:函数\n"
-        "优缺点: 好处与代价\n"
-        "影响: 对现有行为/配置/性能的影响与风险\n",
+        "只能修改已存在的文件；测试加进已存在的 _test.go。直接写 patch，不要回说明。\n"
+        f"写完再写 autobot-pr.md，只含五行：问题 / 改动 / 位置 / 优缺点 / 影响。\n",
         int(os.environ.get("AGENT_IMPLEMENT_TIMEOUT") or 1800))
     if not os.path.isfile(patch):
         say(lines, f"{src}: 实现未产出（退出码 {code}）｜{out}")
