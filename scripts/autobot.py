@@ -120,6 +120,14 @@ def report_score(text):
     return int(m.group(1)) if m else 0
 
 
+def own_brief():
+    """本仓 Go 文件清单：让 agent 判「本仓现状」时有据可依，而不是靠猜。
+
+    shortcut: 只给路径不给内容，读不读由 agent 自己定（预算内最多 2 个）。
+    """
+    return run("git", "ls-files", "*.go", check=False)[1].splitlines()[:250]
+
+
 def analyze(src, lines):
     """clone → agent 读代码 → 差异报告。返回报告路径（失败为 ""）。"""
     up = up_clone(src)
@@ -137,6 +145,10 @@ def analyze(src, lines):
         + "\n".join(files) + "\n最近提交：\n" + logs
         + ("\nREADME 摘要：\n" + readme if readme else "")
         + "\n**最多读 6 个文件**（挑这 6 个里最能说明差异的），20 分钟内必须写出报告。\n"
+        "本仓 Go 文件清单（写「差异」时对照）：\n" + "\n".join(own_brief()) + "\n"
+        "**「差异」一行必须点名本仓的 文件:函数**。若读了本仓代码确认已有等价实现，"
+        "就写「本仓已有：<文件:函数>」并把值得度降到 0-1，不要报 3。\n"
+        "（上一轮报 3 的那条，implement 一读代码就发现本仓早就有了，白跑一整轮。）\n"
         "只读：不要修改本仓任何文件、不要 commit、不要 push。\n"
         f"把结论写进 `{rp}`，严格用这个格式：\n"
         "值得度: 0-3（0=没有可借鉴；3=本仓明确缺这个能力）\n"
