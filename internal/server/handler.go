@@ -1050,8 +1050,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 轮转只会把整池健康号逐个白打一遍（此前还按 ErrClient 喂连败降权），
 			// 客户端等完全池后拿到 503「账号不可用」，与账号健康毫无关系。
 			// fail-fast 400 透传上游原文 + hint 指向「开新会话」，不罚号不轮转。
-			// shortcut: 未做「剥离工具历史后自愈重试一次」，Codex 坏会话仍需用户新建会话；
-			// 补自愈时在 fail() 前重写 body 再走一次同账号尝试即可。
+			// shortcut: 已由出站管线 mergeAdjacentToolCalls 归一「拆开的并行调用」形态；
+			// 其余成因的配对断裂（客户端持久化坏历史）仍需用户新建会话。
 			if kind == upstream.ErrToolMismatch {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
