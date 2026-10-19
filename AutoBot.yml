@@ -72,6 +72,8 @@ upstream:
     - a1007479270/aidaka
     - fancylear/dsh-workbuddy-credits
     - Libra1337/Reso2api
+    - TanTaolov/workbuddy2api-panel
+    - jin66god/workbuddy2api-panel
 
   # 一个仓库一个 job：每个仓独立 clone、独立分析，互不影响
   shard_size: 1
