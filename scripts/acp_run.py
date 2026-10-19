@@ -25,9 +25,18 @@ def main():
     cwd = os.environ.get("ACP_CWD") or os.getcwd()
     p = subprocess.Popen(
         ["hermes", "acp", "--accept-hooks"], cwd=cwd,
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1)
     err = []
+
+    def pump_stderr():
+        # agent 起不来时原因全在 stderr；只留告警和错误，插件注册那类 INFO 太吵
+        for line in p.stderr:
+            if any(k in line for k in (" ERROR ", " WARNING ", "Traceback", "Error:")):
+                err.append(line.rstrip())
+                print("[acp] " + line.rstrip(), flush=True)
+
+    threading.Thread(target=pump_stderr, daemon=True).start()
 
     def send(obj):
         try:
@@ -93,8 +102,9 @@ def main():
         pass
     p.wait(timeout=30)
     if err:
-        print("[非 JSON 输出] " + " / ".join(err[-3:])[:200], flush=True)
-    return 0
+        print("[acp stderr 末 5 行] " + " / ".join(err[-5:])[:400], flush=True)
+    # 通道提前断开 = 失败，别让上层当成「跑完了但没产出」
+    return 1 if p.returncode not in (0, None) else 0
 
 
 if __name__ == "__main__":

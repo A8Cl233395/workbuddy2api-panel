@@ -138,6 +138,8 @@ jobs:
           HERMES_YOLO_MODE: "1"
         run: |
           rm -f /tmp/hermes-selftest.txt
+          # ACP 与 -z 的依赖不同：-z 能跑不代表 ACP 能起
+          timeout 120 hermes acp --check || echo "acp --check 退出码 $?"
           timeout 240 hermes -z "用 write 工具把 exactly-ok 写进 /tmp/hermes-selftest.txt，然后结束。不要做别的。" \
             --yolo --accept-hooks < /dev/null || echo "退出码 $?"
           echo "--- 产物:"; cat /tmp/hermes-selftest.txt 2>/dev/null || echo "(没有产物)"
@@ -227,6 +229,8 @@ jobs:
           HERMES_YOLO_MODE: "1"
         run: |
           rm -f /tmp/hermes-selftest.txt
+          # ACP 与 -z 的依赖不同：-z 能跑不代表 ACP 能起
+          timeout 120 hermes acp --check || echo "acp --check 退出码 $?"
           timeout 240 hermes -z "用 write 工具把 exactly-ok 写进 /tmp/hermes-selftest.txt，然后结束。不要做别的。" \
             --yolo --accept-hooks < /dev/null || echo "退出码 $?"
           echo "--- 产物:"; cat /tmp/hermes-selftest.txt 2>/dev/null || echo "(没有产物)"
