@@ -61,8 +61,9 @@ jobs:
     # 66 个仓一个 job 串行跑不完，按片并行；每片自己 clone、自己分析、自己上传报告
     strategy:
       fail-fast: false
-      # 换了自己的网关后并发能开到 6；单仓分析压线 25 分钟，66 仓约 5 小时
-      max-parallel: 6
+      # 免费档 10 RPM 且同类型 Key 共享一个池：并发跑 N 个 job 就是 N 倍超出，
+      # 只能串行。68 仓 × 约 30 次调用 ÷ 10 RPM ≈ 3.4 小时，这是下限。
+      max-parallel: 1
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ubuntu-latest
     timeout-minutes: 120

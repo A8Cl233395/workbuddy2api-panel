@@ -56,7 +56,7 @@ def agent(task, timeout):
     # ACP 客户端的 session/request_permission 也一律允许
     cmd = [sys.executable, os.path.join(ROOT, "scripts", "acp_run.py"), task]
     tail = ""
-    for attempt in range(3):
+    for attempt in range(5):
         log_f = "/tmp/autobot-agent.log"
         pipe = " ".join(shlex.quote(c) for c in cmd) + " 2>&1 | tee " + shlex.quote(log_f)
         p = subprocess.Popen(
@@ -78,8 +78,10 @@ def agent(task, timeout):
         tail = " / ".join(keep)[:300]
         if code == 0 or "429" not in tail:
             return code, tail
-        wait = 60 * (attempt + 1)
-        print(f"  429 限流，{wait}s 后重试（{attempt + 1}/3）", flush=True)
+        # 免费档是「允许突发 30、持续 10 RPM」：agent 一阵工具调用就会打满，
+        # 退避要够长才能等到窗口滑过去，30→300s 封顶。
+        wait = min(30 * 2 ** attempt, 300)
+        print(f"  429 限流，{wait}s 后重试（{attempt + 1}/5）", flush=True)
         time.sleep(wait)
     return code, tail
 
