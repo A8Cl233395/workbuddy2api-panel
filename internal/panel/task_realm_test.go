@@ -10,6 +10,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -166,6 +167,41 @@ func TestGlobalCheckinIsSkippedWithoutUpstreamRequest(t *testing.T) {
 	}
 	if got := requests.Load(); got != 0 {
 		t.Fatalf("global check-in made %d upstream requests, want 0", got)
+	}
+}
+
+// TestAccountTravelRequiresSchedulerAndKnownUID 按号旅行端点（issue #227）：
+// 无调度器 501；未知 uid 404。门控分支由 scheduler 侧用例覆盖。
+func TestAccountTravelRequiresSchedulerAndKnownUID(t *testing.T) {
+	useRealmForTest(t)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"code":0,"message":"OK","data":{}}`))
+	}))
+	defer srv.Close()
+
+	up := upstream.New()
+	up.HTTP, up.BillingBaseCN = srv.Client(), srv.URL
+	pool := pool.New("")
+	pool.Add(testRealmAuth(t, "cn-1", "cn"))
+
+	// 无调度器 → 501
+	noSched := New(Config{Pool: pool, Upstream: up})
+	rec := httptest.NewRecorder()
+	noSched.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/panel/api/accounts/cn-1/travel", nil))
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("no scheduler status=%d want 501", rec.Code)
+	}
+
+	// 有调度器：未知 uid → 404
+	p := New(Config{Pool: pool, Upstream: up, Scheduler: scheduler.New(scheduler.Config{
+		Pool: pool, Upstream: up,
+	})})
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/panel/api/accounts/nobody/travel", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown uid status=%d want 404 body=%s", rec.Code, rec.Body.String())
 	}
 }
 
