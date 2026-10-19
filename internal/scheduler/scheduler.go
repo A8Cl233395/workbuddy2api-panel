@@ -565,7 +565,10 @@ func (s *Scheduler) RunCheckinNow() {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
-		if a == nil || a.RefreshTokenValue() == "" {
+		// 无 refresh token 的账号默认跳过（保号以刷新为前提）；静态 API Key 例外——
+		// 它没有 refresh token 也不需要刷新，但下方余额刷新（企业口径）是 credit_floor
+		// 与面板额度的唯一数据源，必须照跑。带 access token 的 JWT 账号保持现状跳过。
+		if a == nil || (a.RefreshTokenValue() == "" && !a.IsAPIKey()) {
 			continue
 		}
 		// D4 门控：realm=global 账号无签到体系，直接跳过（不发起任何上游调用，避免风控）。
@@ -578,7 +581,7 @@ func (s *Scheduler) RunCheckinNow() {
 		// 400 code 10001「企业账号不支持该操作」。跳过签到，但**不 continue**——
 		// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
 		// credit_floor 判定与面板额度展示的唯一数据源）。
-		if !a.IsEnterprise() {
+		if a.SupportsPersonalEndpoints() {
 			// 先查活动状态（只读）：本机 checkin_done 只记录我们自己发起的签到，用户从手机 /
 			// 官方客户端签过就看不到；上游 today_checked_in 才是权威事实。已签则直接记账跳过
 			// （省掉 21:00 那一轮注定被幂等拒绝的写调用），顺带把连登与活动截止落进日志；
@@ -658,7 +661,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 点亮 growth 连登天数 / 解锁 first_buddy 领养——两者对企业号都是 403
 		// （「growth system is only available for personal users」），即零收益。
 		// 该类「静默无效」最易被忽略（日志无异常），故显式跳过，不给上游多发一次请求。
-		if a.IsEnterprise() {
+		if !a.SupportsPersonalGrowth() {
 			continue
 		}
 		// 注意：活跃上报**不**跳过 global 账号（上游 a190252 同口径）。国际版

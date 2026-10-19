@@ -209,6 +209,65 @@ func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
 // 无需加锁——Realm() 加锁是因为 realm/Domain 会被 RefreshToken 在锁内改写。
 func (a *Auth) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) != "" }
 
+// apiTokenPrefixes 静态 API Key 的前缀集合：ck_（CodeBuddy 控制台签发）与
+// pt_（官方 CLI @tencent-ai/codebuddy-code 另有该前缀）。
+//
+// 官方 CLI 的判据是 tokenType === "ApiKey" 且 token 以这两个前缀之一开头；auth
+// 文件不持久化 tokenType（refresh 只认 OAuth 设备流，静态 Key 无法刷新），前缀是
+// 落盘形态里唯一稳定、跨进程一致的判据。
+var apiTokenPrefixes = []string{"ck_", "pt_"}
+
+// isAPIKeyToken 判 token 是否以静态 API Key 前缀开头。
+func isAPIKeyToken(at string) bool {
+	for _, p := range apiTokenPrefixes {
+		if strings.HasPrefix(at, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAPIKeyLocked IsAPIKey 的无锁内部实现：仅限**已持 a.mu** 的调用方使用
+// （sync.Mutex 不可重入，锁内再调 AccessTokenValue 会自锁）。
+func (a *Auth) isAPIKeyLocked() bool { return isAPIKeyToken(a.AccessToken) }
+
+// IsAPIKey 报告账号是否为静态 API Key 账号（AccessToken 以 ck_/pt_ 开头）。
+//
+// 静态 Key 直接可用（Authorization: Bearer <key>，官方 CLI 同时发 X-API-Key），
+// 但它**没有**个人账号身份：签到 / 成长任务 / 连登 / 旅行 / 夜猫子一律不适用，
+// 额度只能走企业口径端点（个人 get-user-resource 对静态 Key 返回空 Accounts），
+// 见 UsesEnterpriseBilling。
+//
+// 经 AccessTokenValue() 加锁读取：RefreshToken 会在锁内改写 AccessToken。
+func (a *Auth) IsAPIKey() bool {
+	if a == nil {
+		return false
+	}
+	return isAPIKeyToken(a.AccessTokenValue())
+}
+
+// UsesEnterpriseBilling 报告账号的额度查询是否该走企业口径端点
+// （/v2/billing/meter/get-enterprise-user-usage）。
+//
+// 企业版与静态 API Key 账号同属此列：个人 get-user-resource 对二者均返回空
+// Accounts（企业账号无个人资源包；静态 Key 无个人账号身份），额度必须走企业口径，
+// 否则余额恒为 0 → 积分保底把可用号当成耗尽号挡掉。
+func (a *Auth) UsesEnterpriseBilling() bool { return a.IsEnterprise() || a.IsAPIKey() }
+
+// SupportsPersonalGrowth 报告账号是否具备个人成长体系（签到 / 成长任务 / 连登管家 /
+// 猫猫旅行 / 夜猫子）。企业版与静态 API Key 都没有该体系：
+//   - 企业版：上游一律拒绝（400 code 10001 / 403 growth-only，见 IsEnterprise）；
+//   - 静态 API Key：根本没有个人账号身份。
+//
+// scheduler 各任务与 panel 成长入口统一用本方法门控，避免对注定失败的端点空发请求、
+// 把本可正常对话的号攒出一串上游报错。
+func (a *Auth) SupportsPersonalGrowth() bool { return !a.IsEnterprise() && !a.IsAPIKey() }
+
+// SupportsPersonalEndpoints 报告账号是否可调用「签到 / 任务列表」这类显式报错的个人端点。
+// 与 SupportsPersonalGrowth（执行类门控）刻意分开命名：两者当前的判据相同，但语义不同
+// ——将来若某类账号「读得到、记不上账」，只需改这一处而不影响执行类门控。
+func (a *Auth) SupportsPersonalEndpoints() bool { return !a.IsEnterprise() && !a.IsAPIKey() }
+
 // 不要再用 AccessToken 的 token_source=enterprise_switch 判定「企业上下文」：
 // 实测两个只带该章的**个人版**号（enterpriseId 空）成长任务全部 claimed、行为事件
 // 照常计分——该章只记本次授权走了哪条流程。企业形态一律以 enterpriseId 为准。
@@ -224,6 +283,11 @@ func isGlobalDomain(d string) bool {
 func (a *Auth) NeedsRefresh(within time.Duration) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// 静态 API Key 永不刷新（refresh 端点只认 OAuth 设备流）：恒 false，否则请求
+	// 路径会先 refresh、失败后把该号当坏号冷却换号——Key 本身是好的。
+	if a.isAPIKeyLocked() {
+		return false
+	}
 	if a.ExpiresAt <= 0 {
 		return true
 	}
