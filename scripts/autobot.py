@@ -208,7 +208,7 @@ def implement(src, idea, lines):
         "只做一件事：read「适配」里点名的那几个文件，然后把改动方案写进 "
         f"`{plan_f}`——要改哪个 文件:函数、改成什么、测试加在哪，每处给出准确的位置与代码。\n"
         "不要写实现文件、不要写 diff、不要跑 go build。禁止输出计划说明，直接写文件。\n",
-        int(os.environ.get("PI_PLAN_TIMEOUT") or 600))
+        int(os.environ.get("PI_PLAN_TIMEOUT") or 1800))
     if not os.path.isfile(plan_f):
         say(lines, f"{src}: 改动方案未产出（退出码 {code}）｜{out}")
         return False, ""
