@@ -100,7 +100,10 @@ jobs:
               "        context_length: 524288\n"
               "model:\n"
               f"  default: \"{m}\"\n"
-              "  provider: ci\n")
+              "  provider: ci\n"
+              # CI 没人点审批：yolo 之外再关掉审批层，免得工具调用等一个不存在的按钮
+              "approvals:\n"
+              "  mode: off\n")
           open(os.path.join(os.environ["HERMES_HOME"], "config.yaml"), "w").write(cfg)
           PY
           hermes --version
@@ -128,6 +131,7 @@ jobs:
         timeout-minutes: 6
         env:
           HERMES_HOME: ${{ runner.temp }}/hermes
+          HERMES_YOLO_MODE: "1"
         run: |
           rm -f /tmp/hermes-selftest.txt
           timeout 240 hermes -z "用 write 工具把 exactly-ok 写进 /tmp/hermes-selftest.txt，然后结束。不要做别的。" \
@@ -143,6 +147,7 @@ jobs:
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           HERMES_HOME: ${{ runner.temp }}/hermes
+          HERMES_YOLO_MODE: "1"
           AGENT: hermes
           SRC: ${{ inputs.repo }}
         run: |
@@ -205,7 +210,10 @@ jobs:
               "        context_length: 524288\n"
               "model:\n"
               f"  default: \"{m}\"\n"
-              "  provider: ci\n")
+              "  provider: ci\n"
+              # CI 没人点审批：yolo 之外再关掉审批层，免得工具调用等一个不存在的按钮
+              "approvals:\n"
+              "  mode: off\n")
           open(os.path.join(os.environ["HERMES_HOME"], "config.yaml"), "w").write(cfg)
           PY
           HERMES_HOME="$HERMES_HOME" hermes --version
@@ -214,6 +222,7 @@ jobs:
         timeout-minutes: 6
         env:
           HERMES_HOME: ${{ runner.temp }}/hermes
+          HERMES_YOLO_MODE: "1"
         run: |
           rm -f /tmp/hermes-selftest.txt
           timeout 240 hermes -z "用 write 工具把 exactly-ok 写进 /tmp/hermes-selftest.txt，然后结束。不要做别的。" \
@@ -249,6 +258,7 @@ jobs:
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           HERMES_HOME: ${{ runner.temp }}/hermes
+          HERMES_YOLO_MODE: "1"
           AGENT: hermes
         run: python3 scripts/autobot.py --phase implement
       - name: 报告进 job summary
