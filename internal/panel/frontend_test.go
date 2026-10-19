@@ -1908,7 +1908,9 @@ func TestAppJSModelBusyTag(t *testing.T) {
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const start = src.indexOf('// 上游模型繁忙度（/v2/chat/busy）文案');
+// 起点前移到模型行渲染这一整段（含 mdAvailabilityOf/mdAvailabilityTag），
+// 否则上游新增的可用性标签会在截取区间外、被当成未定义。
+const start = src.indexOf('function mdAvailabilityOf');
 const end = src.indexOf('function renderModels()');
 if (start < 0 || end < start) throw new Error('busy block not found');
 const ctx = {
