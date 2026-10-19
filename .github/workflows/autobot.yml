@@ -39,12 +39,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: 按 AutoBot.yml 生成分片
         id: shards
+        env:
+          SRC: ${{ inputs.repo }}
         run: |
           python3 -m pip install --quiet pyyaml
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, math, os, yaml
           cfg = yaml.safe_load(open("AutoBot.yml", encoding="utf-8"))["upstream"]
-          repos = cfg["repos"]
+          # 指定单仓时只切 1 片：否则会起 66 个 job 全部跳过，看着像 66 个假成功
+          src = (os.environ.get("SRC") or "").strip()
+          repos = [src] if src else cfg["repos"]
           size = int(cfg.get("shard_size") or 4)
           n = math.ceil(len(repos) / size)
           print("repos=%d" % len(repos))
@@ -140,8 +144,6 @@ jobs:
           test -f /tmp/hermes-selftest.txt
 
       - name: 分析这一片
-        # 指定单仓时只有第 0 片干活，其余跳过（job 级 if 引用不了 matrix，只能放这里）
-        if: inputs.repo == '' || startsWith(matrix.shard, '0/')
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}

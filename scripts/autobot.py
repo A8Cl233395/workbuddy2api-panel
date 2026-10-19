@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -46,34 +47,29 @@ def agent(task, timeout):
 
     429 是限流的常态，退避重试三次再认输。
 
-    shortcut: 用 Popen + 文件重定向而不是 subprocess.run(capture_output)，
-    因为 agent 拉起的工具子进程会继承 stdout 管道：kill 掉主进程之后管道仍开着，
-    run() 收尾时永远等下去（实测挂到 job 超时 48 分钟都没退）。
+    shortcut: 用 bash tee 管道 + Popen.wait，不用 subprocess.run(capture_output)——
+    后者要读完管道才算完，agent 拉起的工具子进程继承管道后 kill 主进程也不返回
+    （实测挂到 job 超时 48 分钟）。tee 让过程实时进日志，killpg 杀整个进程组。
     """
     # CI 里没人点审批弹窗：--yolo 一律允许，--accept-hooks 让 hooks 不再询问
     cmd = ["hermes", "-z", task, "--yolo", "--accept-hooks"]
     tail = ""
     for attempt in range(3):
-        # 输出落文件再读：既要能看 agent 的思考过程，也要能超时后照常收尾
         log_f = "/tmp/autobot-agent.log"
-        with open(log_f, "w", encoding="utf-8") as fh:
-            p = subprocess.Popen(
-                cmd, cwd=ROOT, stdin=subprocess.DEVNULL,
-                stdout=fh, stderr=subprocess.STDOUT, text=True,
-                start_new_session=True)
+        pipe = " ".join(shlex.quote(c) for c in cmd) + " 2>&1 | tee " + shlex.quote(log_f)
+        p = subprocess.Popen(
+            ["bash", "-c", pipe], cwd=ROOT, stdin=subprocess.DEVNULL,
+            start_new_session=True)
+        try:
+            p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
             try:
-                p.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(p.pid, signal.SIGKILL)   # 连它拉起的工具子进程一起杀
-                except ProcessLookupError:
-                    pass
-                p.wait(30)
+                os.killpg(p.pid, signal.SIGKILL)   # 连它拉起的工具子进程一起杀
+            except ProcessLookupError:
+                pass
+            p.wait(30)
         out = open(log_f, encoding="utf-8", errors="replace").read()
-        if out.strip():
-            print("--- agent 输出（尾 60 行）---", flush=True)
-            print("\n".join(out.splitlines()[-60:]), flush=True)
-        else:
+        if not out.strip():
             print("--- agent 无任何输出 ---", flush=True)
         code = 124 if (p.returncode is None or p.returncode < 0) else p.returncode
         keep = (out.strip().splitlines() or [""])[-3:]
