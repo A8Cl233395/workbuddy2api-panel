@@ -80,6 +80,10 @@ type Config struct {
 	Audit *AuditLog
 	// BudgetLimit <=0 不拦。按 CST 日累计观测到的 credit。
 	BudgetLimit float64
+	// BurstCreditLimit <=0 不拦：5 分钟窗口内累计 credit 达此值即拒（issue #229）。
+	BurstCreditLimit float64
+	// CacheLowRate <=0 不拦：连续 5 轮命中率低于此百分比即冷却 60s（issue #229）。
+	CacheLowRate float64
 	// RequestLog 请求指标与脱敏 JSONL 归档（可选；nil = 不记录）。
 	RequestLog *reqlog.Recorder
 
@@ -162,6 +166,7 @@ func NewHandler(cfg Config) *Handler {
 		taskRunning: map[string]bool{},
 		budget:      newDailyBudget(cfg.BudgetLimit),
 	}
+	h.budget.setGuards(cfg.BurstCreditLimit, cfg.CacheLowRate)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	// Codex 客户端在 supports_websockets/prefer_websockets 时先探 GET /v1/responses 升级 WS。
@@ -273,7 +278,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
-	budgetUsed, budgetLimit, budgetRejected := h.budget.snapshot()
+	budgetUsed, budgetLimit, budgetRejected, budgetLastReject := h.budget.snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":       h.cfg.Pool.List(),
 		"total":          total,
@@ -303,10 +308,11 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"per_model":    exploreLast,
 		},
 		"daily_budget": map[string]any{
-			"used":     budgetUsed,
-			"limit":    budgetLimit,
-			"rejected": budgetRejected,
-			"day":      cstDay(time.Now()),
+			"used":        budgetUsed,
+			"limit":       budgetLimit,
+			"rejected":    budgetRejected,
+			"last_reject": budgetLastReject,
+			"day":         cstDay(time.Now()),
 		},
 	})
 }
@@ -635,10 +641,15 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	if !h.budget.admit() {
-		used, limit, _ := h.budget.snapshot()
-		writeOpenAIError(w, http.StatusTooManyRequests, "daily_budget_exceeded",
-			fmt.Sprintf("daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit))
+	if ok, why := h.budget.admit(); !ok {
+		used, limit, _, _ := h.budget.snapshot()
+		code, msg := "daily_budget_exceeded", fmt.Sprintf(
+			"daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit)
+		if why != "" {
+			// 快速闸的拒因自带可读说明，别和「当日用光」混成一句话
+			code, msg = "credit_guard_tripped", why
+		}
+		writeOpenAIError(w, http.StatusTooManyRequests, code, msg)
 		return
 	}
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；

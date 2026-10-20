@@ -108,6 +108,7 @@ func (s *chatStat) done() {
 		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit,
 		s.clientIP, s.userAgent, s.prep, s.do, s.effort)
 	s.budget.add(s.credit, s.hasCredit)
+	s.budget.observeCache(int64(s.cacheHit), int64(s.cacheMiss), s.hasCache)
 	noteProm(s, total)
 }
 

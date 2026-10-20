@@ -387,7 +387,9 @@ func main() {
 		MetricsEnabled: cfg.Metrics.Enabled,
 		Tasks:          sch,
 		Audit:          auditLog,
-		BudgetLimit:    cfg.Budget.DailyCreditLimit,
+		BudgetLimit:      cfg.Budget.DailyCreditLimit,
+		BurstCreditLimit: cfg.Budget.BurstCreditLimit,
+		CacheLowRate:     cfg.Budget.CacheLowRate,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -690,6 +692,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	}
 	if gw != nil {
 		gw.SetBudgetLimit(newCfg.Budget.DailyCreditLimit)
+		gw.SetBudgetGuards(newCfg.Budget.BurstCreditLimit, newCfg.Budget.CacheLowRate)
 	}
 
 	return restartRequiredFields(baseline, newCfg), nil

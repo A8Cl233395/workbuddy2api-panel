@@ -104,7 +104,7 @@
     "audit_file": "./data/admin_audit.log"
   },
   "metrics": { "enabled": false },
-  "budget": { "daily_credit_limit": 0 },
+  "budget": { "daily_credit_limit": 0, "burst_credit_limit": 0, "cache_low_rate": 0 },
   "alerting": {
     "enabled": false,
     "webhook_url": "",
