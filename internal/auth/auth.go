@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -253,6 +254,40 @@ func (a *Auth) IsAPIKey() bool {
 // Accounts（企业账号无个人资源包；静态 Key 无个人账号身份），额度必须走企业口径，
 // 否则余额恒为 0 → 积分保底把可用号当成耗尽号挡掉。
 func (a *Auth) UsesEnterpriseBilling() bool { return a.IsEnterprise() || a.IsAPIKey() }
+
+// TokenSource 从 AccessToken 的 JWT payload 里读 token_source 声明（官方客户端用它
+// 填出站 X-Auth-Method 与 X-Userinfo.token_source）。非 JWT / 无该声明 / 解码失败一律
+// 返回空串——空表示「这个账号没有该维度」，调用方随之不发对应头（不伪造）。
+//
+// 每次现解码而不缓存：RefreshToken 会整体换发 token，token_source 可能随重新授权翻转。
+// 成本是一次 base64 + 小 JSON，相对一次上游请求可忽略。
+func (a *Auth) TokenSource() string {
+	if a == nil {
+		return ""
+	}
+	return jwtClaim(a.AccessTokenValue(), "token_source")
+}
+
+// jwtClaim 解出 JWT payload 里的指定字符串声明；非 JWT / 解码失败返回空。
+// 先按无填充 base64url 解（JWT 标准），失败再试带填充形态（兼容非标准签发方）。
+func jwtClaim(token, name string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		if raw, err = base64.URLEncoding.DecodeString(parts[1]); err != nil {
+			return ""
+		}
+	}
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	v, _ := payload[name].(string)
+	return strings.TrimSpace(v)
+}
 
 // SupportsPersonalGrowth 报告账号是否具备个人成长体系（签到 / 成长任务 / 连登管家 /
 // 猫猫旅行 / 夜猫子）。企业版与静态 API Key 都没有该体系：
