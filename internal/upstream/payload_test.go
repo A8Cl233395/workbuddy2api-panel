@@ -236,6 +236,52 @@ func TestPrepareBodyOptEffortNearestPick(t *testing.T) {
 	}
 }
 
+func TestPrepareBodyOptRequestedVsEffectiveEffort(t *testing.T) {
+	// issue #43 / #18：日志里「客户端设了 max、显示却是 high」有两种完全不同的成因，
+	// 必须能靠一次日志分辨：客户端根本没发（网关补的默认档），还是发了被降级
+	// （模型档位表里没有这一档）。requested 在 injectThinking 之前抓，就是为此。
+	onlyHigh := map[string][]string{"deepseek-v4.1-flash": {"high"}}
+	full := map[string][]string{"deepseek-v4.1-flash": {"low", "high", "max"}}
+	defaults := map[string]string{"deepseek-v4.1-flash": "high"}
+
+	cases := []struct {
+		name             string
+		body             string
+		efforts          map[string][]string
+		wantReq, wantEff string
+	}{
+		{
+			name:    "客户端发 max 且模型支持 → 原样透传，日志 max->不显示降级",
+			body:    `{"model":"deepseek-v4.1-flash","reasoning_effort":"max"}`,
+			efforts: full,
+			wantReq: "max", wantEff: "max",
+		},
+		{
+			name:    "客户端发 max 但只支持 high → 降级可见（max->high）",
+			body:    `{"model":"deepseek-v4.1-flash","reasoning_effort":"max"}`,
+			efforts: onlyHigh,
+			wantReq: "max", wantEff: "high",
+		},
+		{
+			name:    "客户端没发 → requested 为空，日志不会误报成降级",
+			body:    `{"model":"deepseek-v4.1-flash"}`,
+			efforts: onlyHigh,
+			wantReq: "", wantEff: "high",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, req, eff := prepareBodyOpt([]byte(c.body), false, c.efforts, defaults, nil, "", "", false)
+			if req != c.wantReq {
+				t.Errorf("requested=%q want %q（客户端原始档位）", req, c.wantReq)
+			}
+			if eff != c.wantEff {
+				t.Errorf("effective=%q want %q（出站档位）", eff, c.wantEff)
+			}
+		})
+	}
+}
+
 func TestPrepareBodyOptWithEfforts(t *testing.T) {
 	efforts := map[string][]string{
 		"glm-5.2":      {"off", "low", "high"},
