@@ -72,9 +72,12 @@ upstream:
     - a1007479270/aidaka
     - fancylear/dsh-workbuddy-credits
     - Libra1337/Reso2api
+    - TanTaolov/workbuddy2api-panel
+    - jin66god/workbuddy2api-panel
 
-  # 一个仓库一个 job：每个仓独立 clone、独立分析，互不影响
-  shard_size: 1
+  # 每片 4 个仓串行：串行是硬要求（免费档 10 RPM 共享一个池），
+  # 放大每片只为少付 setup 开销（每片一次 pip install ≈2 分钟）
+  shard_size: 4
   # 每轮最多真正落地几条（每条要起 agent 写代码、跑测试、开 PR）
   land_max: 1
 

@@ -56,7 +56,7 @@ def agent(task, timeout):
     # ACP 客户端的 session/request_permission 也一律允许
     cmd = [sys.executable, os.path.join(ROOT, "scripts", "acp_run.py"), task]
     tail = ""
-    for attempt in range(3):
+    for attempt in range(5):
         log_f = "/tmp/autobot-agent.log"
         pipe = " ".join(shlex.quote(c) for c in cmd) + " 2>&1 | tee " + shlex.quote(log_f)
         p = subprocess.Popen(
@@ -76,10 +76,14 @@ def agent(task, timeout):
         code = 124 if (p.returncode is None or p.returncode < 0) else p.returncode
         keep = (out.strip().splitlines() or [""])[-3:]
         tail = " / ".join(keep)[:300]
-        if code == 0 or "429" not in tail:
+        # 只看日志不看退出码：agent 吞掉 429 之后仍以 0 退出，按 code==0 放行
+        # 会把这轮当成「跑完了但没产出」（真踩过，17 片里 1 片这么挂的）。
+        if "429" not in out:
             return code, tail
-        wait = 60 * (attempt + 1)
-        print(f"  429 限流，{wait}s 后重试（{attempt + 1}/3）", flush=True)
+        # 免费档是「允许突发 30、持续 10 RPM」：agent 一阵工具调用就会打满，
+        # 退避要够长才能等到窗口滑过去，30→300s 封顶。
+        wait = min(30 * 2 ** attempt, 300)
+        print(f"  429 限流，{wait}s 后重试（{attempt + 1}/5）", flush=True)
         time.sleep(wait)
     return code, tail
 
@@ -151,14 +155,19 @@ def analyze(src, lines):
         f.write("\n## 本仓 Go 文件清单（写「差异」时对照）\n" + "\n".join(own_brief()) + "\n")
     task = (
         f"先读 {up_f}。本仓是 WorkBuddy 的 Go 网关（当前目录）。\n"
-        "任务：分析这个上游仓库与本仓的实现差异——它有哪些本仓还没有的功能、修过的 bug、"
-        "更好的实现，哪些值得借鉴，要怎么适配到本仓。\n"
-        "20 分钟内必须写出报告。只读，不要修改本仓任何文件。\n"
-        "「差异」一行必须点名本仓的 文件:函数；若确认本仓已有等价实现，"
-        "写「本仓已有：<文件:函数>」并把值得度降到 0-1，不要报 3。\n"
-        f"结论写进 {rp}，严格用这个格式：\n"
-        "值得度: 0-3\n功能: 上游有什么，解决什么问题\n差异: 本仓现状（文件:函数）对比上游\n"
-        "适配: 要改本仓哪个 文件:函数，怎么改\n优缺点: 好处与代价\n影响: 行为/配置/性能风险\n"
+        "任务：把这个上游仓库与本仓**逐功能一一对照**——逐个功能点判断本仓有没有、"
+        "差在哪、要不要借鉴。\n"
+        "20 分钟内写出报告，只读，不要修改本仓任何文件。\n"
+        f"报告写进 {rp}，结构固定，不要写散文：\n"
+        "第 1 行：值得度: 0-3（本轮最高分；0=无可借鉴，3=本仓明确缺这个能力）\n"
+        "然后一张对照表，一个功能一行：\n"
+        "| 功能 | 上游（文件:函数） | 本仓（文件:函数 或 缺失） | 差距 | 值得度 |\n"
+        "|---|---|---|---|---|\n"
+        "表格之后两小节，各不超过 5 行：\n"
+        "适配: 要落地的那几项，改本仓哪个 文件:函数、怎么改\n"
+        "影响: 行为/配置/性能风险\n"
+        "「本仓」列必须点名真实 文件:函数；没有就写「缺失」，没核实就写「未核实」。"
+        "本仓已有等价实现的项，值得度给 0-1，不要报 3。\n"
     )
     code, out = agent(task, int(os.environ.get("AGENT_ANALYZE_TIMEOUT") or 1800))
     if not os.path.isfile(rp):
@@ -166,6 +175,20 @@ def analyze(src, lines):
         return ""
     say(lines, f"{src}: 分析完成 值得度={report_score(open(rp, encoding='utf-8').read())}")
     return rp
+
+
+def report_head(text, n=60):
+    """报告一句话摘要：优先取对照表第一条真有差距的行，其次「功能:」行。"""
+    for line in text.splitlines():
+        t = line.strip()
+        if t.startswith("|") and "---" not in t:
+            cells = [c.strip() for c in t.strip("|").split("|")]
+            if len(cells) >= 4 and cells[0] not in ("功能", "") and cells[3] not in ("", "无"):
+                return " / ".join(cells[:4])[:n]
+        if t.startswith(("功能:", "功能：")):
+            return t[3:].strip()[:n]
+    lines = [x for x in text.strip().splitlines() if x.strip()]
+    return lines[0][:n] if lines else ""
 
 
 def adapt_brief(idea):
@@ -389,7 +412,23 @@ def main():
                 p = os.path.join(REPORT_DIR, f)
                 reports.append((report_score(open(p, encoding="utf-8").read()), p))
         reports.sort(reverse=True)
-        picked = [(s, p) for s, p in reports if s >= 2][:int(up.get("land_max") or 2)]
+        land_max = int(up.get("land_max") or 2)
+        picked = [(s, p) for s, p in reports if s >= 2][:land_max]
+        # 总决策表：每份报告的去向都留痕，人审时不用回头翻 68 个 job
+        say(lines, f"## 决策表（{len(reports)} 份报告，land_max={land_max}）")
+        say(lines, "| 仓库 | 值得度 | 摘要 | 决定 |")
+        say(lines, "|---|---|---|---|")
+        kept = {p for _s, p in picked}
+        for sc, rp in reports:
+            name = os.path.basename(rp)[:-3].replace("__", "/")
+            if rp in kept:
+                why = "落地"
+            elif sc < 2:
+                why = "值得度<2"
+            else:
+                why = "超出 land_max"
+            say(lines, f"| {name} | {sc} | {report_head(open(rp, encoding='utf-8').read())} | {why} |")
+        say(lines, "")
         say(lines, "落地候选：" + (", ".join(f"{os.path.basename(p)}({s})" for s, p in picked) or "无"))
         landed = sum(1 for _s, p in picked
                      if land(os.path.basename(p)[:-3].replace("__", "/"), p, pol, args, lines))
