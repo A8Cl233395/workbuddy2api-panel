@@ -10,18 +10,48 @@
 package panel
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"net/http"
+	"strings"
 )
 
 //go:embed index.html
-var indexHTML []byte
+var indexHTMLRaw []byte
 
 //go:embed theme.js
 var themeJS []byte
 
 //go:embed app.js
 var appJS []byte
+
+// 内容指纹（issue #33）：把脚本 URL 绑到脚本内容上。
+//
+// 为什么需要：面板原先靠 `Cache-Control: no-store` 保证不拿到旧脚本，那是对
+// 浏览器的一维约定；中间任何一层（反代缓存、浏览器扩展、企业网关的静态资源
+// 缓存、离线缓存）只要回放了一次旧 app.js，新 HTML 配旧 JS 就会因 DOM 结构
+// 漂移而中途抛异常，后半段的 let/const 不再执行——表现为「账号列表能刷新，
+// 积分构成/用量初始化失败」（#33 报告者受控复现的正是这一形态）。
+// 加性防御：no-store 原样保留，URL 另带内容指纹，跨版本时 URL 必然不同，
+// 旧条目即使被回放也命不中新页面要的那个 key。
+//
+// 取 sha256 前 8 字节（16 个十六进制字符）：够用（碰撞概率对「两版面板脚本」
+// 这种量级毫无意义），又不至于把 URL 撑长。指纹在服务进程启动时算一次
+// （init），进程内恒定，无需清理策略，也不依赖构建注入。
+func fingerprint(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
+
+// indexHTML 是把 <script src="theme.js"> / <script src="app.js"> 换成带指纹
+// URL 之后的页面字节。原始 index.html 里的引用保持无查询串形态（源码可读、
+// diff 干净），指纹只在运行时注入。
+var indexHTML = func() []byte {
+	s := strings.ReplaceAll(string(indexHTMLRaw), `src="theme.js"`, `src="theme.js?v=`+fingerprint(themeJS)+`"`)
+	s = strings.ReplaceAll(s, `src="app.js"`, `src="app.js?v=`+fingerprint(appJS)+`"`)
+	return []byte(s)
+}()
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
