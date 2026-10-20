@@ -10,7 +10,8 @@
  * 不能写成内联脚本：CSP 是 script-src 'self'，内联块会被直接拦掉（页面主题永远停在深色）。
  *
  * 判定规则必须与 app.js 的 effTheme() 逐字一致，否则会出现「预热一套、app.js 再翻一套」
- * 的二次闪烁：只有存了 light / dark 才按存的来，其余（auto、缺失、脏值）一律跟随系统。
+ * 的二次闪烁：只有存了 light / dark 才按存的来，其余（auto、缺失）跟随系统。
+ * 脏值（既非 auto 也非 light/dark）与 app.js 同样直接用作 data-theme——行为一致优先于"看起来安全"。
  */
 (function () {
   var saved = 'auto';
