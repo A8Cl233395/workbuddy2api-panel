@@ -85,6 +85,39 @@ func cacheKeySource(meta ChatMeta) string {
 	return meta.CacheKeyID
 }
 
+// writeBodyConversationID 把会话键回写进 body 的 conversation_id（issue #169，默认关闭）。
+//
+// 已核实的事实（对着官方客户端 96MB 的 app.asar 逐文件扫过，排除 node_modules）：
+//   - 官方桌面客户端**不发**这个 body 字段，也**不发** prompt_cache_key（全包零命中）；
+//   - 会话身份只走请求头：X-Conversation-Request-ID（必发）、X-Conversation-ID、
+//     X-Conversation-Message-ID、X-Request-ID、X-Root-Request-ID（buildQueueHeaders /
+//     injectConversationHeaders 同族）；
+//   - 本网关的 injectConversationHeaders **已经**恒发 X-Conversation-ID（客户端没给时
+//     用 buildCacheKey(uid, src) 现造），所以「补头」这条路已经走完了 —— issue #169
+//     里 hy4-preview-f 那种 36% 整段未命中，是在头已经在的前提下发生的。
+//
+// 剩下的唯一杠杆就是这个 body 字段：issue #169 作者的单变量 2×2 显示上游按
+// **body 的 conversation_id** 分前缀缓存槽（只改它命中率就变），但那条结论来自使用者
+// 侧实验，本仓没有真机复现过。
+//
+// 语义（三条硬约束）：
+//   - body 已有 conversation_id / conversationId → 一个字都不动（客户端声明的会话优先）；
+//   - 会话键为空 → 不写（不伪造会话，空会话语义 = 每次新槽）；
+//   - 写入值 = 与会话头同源的 buildCacheKey(uid, conv)，让「头」与「body」指向同一槽。
+//
+// 默认关闭：多写一个官方客户端不发的字段属于改 body 形态，而上游有 body 校验先例
+// （issue #231：messages[0].role 非 system 直接 11-128/11140）。打开前请用一次
+// 长前缀 A/B 确认（见 internal/probe/probe169.go）。
+func writeBodyConversationID(obj map[string]any, uid, conversation string) {
+	if conversation == "" {
+		return
+	}
+	if strField(obj, "conversation_id") != "" || strField(obj, "conversationId") != "" {
+		return
+	}
+	obj["conversation_id"] = buildCacheKey(uid, conversation)
+}
+
 // buildCacheKey 生成 `wb2a-<uid8>-<convHex>` 格式的稳定 cache key。
 //
 // uid8 提供账号隔离段；convHex = sha256(uid + conversationID)[:16] 的 hex 提供会话段

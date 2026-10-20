@@ -402,6 +402,7 @@ curl -s http://localhost:7863/v1/responses \
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
+| `upstream.write_conversation_id` | `false` | **会话缓存槽回写**（issue #169）：客户端没在 body 带 `conversation_id` 时，把网关派生的会话键（与 `X-Conversation-ID` 头同源的 `buildCacheKey(uid, conv)`）写进出站 body。上游按 **body 该字段** 分前缀缓存槽，而 Claude Code / DSH 这类客户端从不带它——只注入 `prompt_cache_key` 不足以让上游复用同一槽（使用者侧实测 `hy4-preview-f` 36% 请求整段未命中）。官方桌面客户端**不发**该 body 字段（实测其 96MB 包内零命中）、且网关已恒发会话头，故默认关闭：多一个上游未预期字段属于改 body 形态（上游有 `messages[0].role` 这类 body 校验先例，见 issue #231）。打开前用 `internal/probe/probe169.go` 先做一次长前缀 A/B |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `models.hidden` | `[]` | 模型黑名单：`["deepseek-pro"]` 裸名隐藏两域，`["cn:legacy-model"]` / `["global:x"]` 只隐藏该域。**列表不列 + 点名调用直接拒绝**（`/v1/models` 过滤、`/v1/chat/completions` 与 `/v1/images/*` 拒绝）——只藏列表不够，知道名字仍可硬调。面板「模型黑名单」（逗号分隔）保存后**热生效** |

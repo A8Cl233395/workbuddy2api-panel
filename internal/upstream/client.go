@@ -799,6 +799,12 @@ type Client struct {
 	// 探测与合并见 global_models.go）。目录权威 = 桌面端 UA 族，见该文件注释。
 	globalModels fetchGlobalModelsCache
 
+	// WriteConversationID 把会话键回写进出站 body 的 conversation_id（issue #169，
+	// 默认 false）。上游按 body 的 conversation_id 分前缀缓存槽；客户端不带该字段时
+	// 只注入 prompt_cache_key 不会让上游复用同一槽（实测整段未命中）。打开前必须先
+	// 确认上游渠道校验接受该字段（issue #231 有 body 形态校验先例）。
+	WriteConversationID atomic.Bool
+
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	// 面板保存配置热改 + chat 热路径并发读写，用 atomic.Bool 消除数据竞争。
 	SanitizeFingerprints atomic.Bool
@@ -973,7 +979,8 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) ([]
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。与 body 归一化共用
 	// prepareBodyOpt 的同一次 map 解析，不再二次 Unmarshal/Marshal。
-	return prepareBodyOpt(body, c.SanitizeFingerprints.Load(), efforts, defs, maxOut, uid, conversationID, true)
+	return prepareBodyOpt(body, c.SanitizeFingerprints.Load(), efforts, defs, maxOut, uid, conversationID, true,
+		c.WriteConversationID.Load())
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
