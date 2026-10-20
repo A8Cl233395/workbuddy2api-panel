@@ -173,13 +173,6 @@ type Config struct {
 		DeviceTokenFile string `json:"device_token_file"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
-		// WriteConversationID 把网关派生的会话键回写进出站 body 的 conversation_id
-		// （issue #169，默认 false）。上游按 body 的 conversation_id 分前缀缓存槽，
-		// 客户端不带该字段时（Claude Code 这类）只注入 prompt_cache_key 不能让它复用
-		// 同一槽。官方桌面客户端**不发**这个 body 字段（实测其 96MB 包内无
-		// conversation_id 的请求体构造，只有 X-Conversation-* 头），故默认关闭：
-		// 多写一个上游未预期字段属于改 body 形态，需真机确认渠道校验接受。
-		WriteConversationID bool `json:"write_conversation_id"`
 	} `json:"upstream"`
 
 	Features struct {

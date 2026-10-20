@@ -7,7 +7,8 @@
 //   - 有效：**无效**。固定 id 与不带 id 的第二发命中率完全一致（90.9% vs 90.9%），
 //     说明上游前缀缓存按内容共享，与本字段无关；hy4-preview / glm-5.3 两臂都是 0%，
 //     是真不返回缓存命中，不是缺这个字段。
-// 所以 upstream.write_conversation_id 默认关闭，保留只为复验。
+// 所以仓库里不再提供「回写 conversation_id」的开关（2026-10-21 已删除），
+// 本工具保留为测量/复验手段。
 //
 // 背景：上游按 body 的 conversation_id 分前缀缓存槽（上报人的单变量 2×2），
 // 但官方桌面客户端只发 X-Conversation-* 头、body 里没有该字段（96MB app.asar
@@ -260,14 +261,14 @@ func runPhaseB(c *upstream.Client, a *auth.Auth, model string) {
 	case b2.status != 200 || b4.status != 200:
 		fmt.Println("  → 结论 B：无法判定（有请求失败，先看上面的 raw）。")
 	case withoutID >= 50 && withID >= 50:
-		fmt.Println("  → 结论 B：两种形态都命中 → 该模型/上游不吃这个字段（头已足够），开关不必开。")
+		fmt.Println("  → 结论 B：两种形态都命中 → 上游按内容前缀共享缓存，与本字段无关（本仓已不提供该开关）。")
 	case withID-withoutID >= 20:
-		fmt.Println("  → 结论 B：有效。固定 conversation_id 明显提升命中率，")
-		fmt.Println("     可打开 \"upstream\": {\"write_conversation_id\": true}。")
+		fmt.Println("  → 结论 B：该模型上固定 conversation_id 明显提升命中率 —— 与 2026-10-21 的结论不同，")
+		fmt.Println("     值得再查（把本次原始输出贴到 issue #169）。")
 	case withID > withoutID:
-		fmt.Println("  → 结论 B：有提升但幅度小（<20 个百分点）。建议换多个模型各跑一遍再决定。")
+		fmt.Println("  → 结论 B：有提升但幅度小（<20pp）。建议换多个模型各跑一遍再看。")
 	default:
-		fmt.Println("  → 结论 B：无效。固定 id 没带来命中提升，保持开关关闭，避免白改 body 形态。")
+		fmt.Println("  → 结论 B：无效，与 2026-10-21 结论一致（命中率无差别或都为 0）。")
 	}
 	fmt.Println()
 }

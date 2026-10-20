@@ -186,6 +186,8 @@ flowchart LR
 
 上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位对齐（取模型支持的最近档）、`reasoning_content` 回填、指纹脱敏。`codex_responses` 与 `anthropic_messages` 在 Handler 转成 `chat_completions` 再进这条管线，上游仍是 `chat/completions` SSE。
 
+**不要往 body 加 `conversation_id`**（issue #169，2026-10-21 官方 5.8.3 客户端通道真机 A/B）：上游前缀缓存按**内容**共享，加不加、填什么值，命中率完全一致（`deepseek-v4.1-flash` 90.9/90.9、`glm-5.2` 99.9/99.9、`deepseek-v4-pro` 98.6/98.6）；`hy4-preview` / `glm-5.3` 两臂都是 0%，是这些模型/路由本身不返回缓存命中（加到 6.5k 前缀、拉长间隔复测同样 0%）。字段本身不会被拒（三发 200），但加了没有任何收益，所以本仓不再提供该开关。测量工具留在 `internal/probe/probe169.go`（`go:build ignore`）。
+
 ## 快速开始
 
 ### 环境要求
@@ -405,7 +407,6 @@ curl -s http://localhost:7863/v1/responses \
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
-| `upstream.write_conversation_id` | `false` | **会话缓存槽回写**（issue #169）：客户端没在 body 带 `conversation_id` 时，把网关派生的会话键（与 `X-Conversation-ID` 头同源的 `buildCacheKey(uid, conv)`）写进出站 body。上游按 **body 该字段** 分前缀缓存槽，而 Claude Code / DSH 这类客户端从不带它——只注入 `prompt_cache_key` 不足以让上游复用同一槽（使用者侧实测 `hy4-preview-f` 36% 请求整段未命中）。官方桌面客户端**不发**该 body 字段（实测其 96MB 包内零命中）、且网关已恒发会话头，故默认关闭：多一个上游未预期字段属于改 body 形态（上游有 `messages[0].role` 这类 body 校验先例，见 issue #231）。**2026-10-21 真机 A/B 结论：无效**——在官方 5.8.3 客户端自身通道上（渲染进程 `wb.http.post`，自带官方鉴权）对 6 个模型做「固定 conversation_id vs 不带」对照（两臂前缀内容不同，避免跨臂污染），命中率完全一致：`deepseek-v4.1-flash` 90.9/90.9、`glm-5.2` 99.9/99.9、`deepseek-v4-pro` 98.6/98.6；`hy4-preview`、`hy4-preview-exp`、`glm-5.3`（含 6.5k 长前缀）三组两臂**都是 0%**。即：上游前缀缓存按内容共享，与本字段无关；这几个模型是真的不返回缓存命中。字段本身**不被拒绝**（三发 200，随便填也行），所以开关保留但默认关闭，仅供后续复验 |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `models.hidden` | `[]` | 模型黑名单：`["deepseek-pro"]` 裸名隐藏两域，`["cn:legacy-model"]` / `["global:x"]` 只隐藏该域。**列表不列 + 点名调用直接拒绝**（`/v1/models` 过滤、`/v1/chat/completions` 与 `/v1/images/*` 拒绝）——只藏列表不够，知道名字仍可硬调。面板「模型黑名单」（逗号分隔）保存后**热生效** |
@@ -600,13 +601,25 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 如果采用「**一次只放开一个账号、用禁用做流量开关**」的轮换方式（同 IP 多号怕触发风控），闲置待命的号恰恰是最需要签到的——把它设为 `true`，禁用号仍会签到 / 保活 / 刷新余额，**但依旧不参与选号**（`pool` 选号侧的 disabled 过滤不受本开关影响）。
 
+> 该开关**只覆盖调度器的这四类任务**。猫猫旅行、夜猫子、连登管家（挂在签到末尾的 `RunStreakBonusNow`）与成长任务队列**仍按原样跳过禁用账号**——若也需要，请另行提出。
+
 #### 模型锁池（账号池下方那张表）
 
 账号池回答「哪些号不能用」，模型锁池回答「**哪些模型不能用、锁了几个号、还要锁多久**」——上游按模型限流（`6004` / `14003`）时账号仍在池里、`/status` 的 `healthy` 也照样是绿的，此前只能发一次真实请求去试（而试错本身会刷新上游的冷却计时）。
 
 一行 = 一个 (域, 模型)，状态三态：`locked`（该域参与选号的号全被这个模型挡住，换模型或等解锁才有用）、`starved`（此刻没号能服务，但不是模型冷却造成的——账号级冷却/熔断/在途占满，等一下就好）、`partial`（还有号能服务，只是部分被锁）。数据与 `/status` 的 `model_locks` 同源（池内现算，只读），与 `ModelBlocked`（请求失败时回 400 `model_unavailable`）互补。禁用与暂停选号的账号不计入分母，`AuditOnly` 台账与已过期的冷却不算锁——口径与选号严格一致。
 
-> 该开关**只覆盖调度器的这四类任务**。猫猫旅行、夜猫子、连登管家（挂在签到末尾的 `RunStreakBonusNow`）与成长任务队列**仍按原样跳过禁用账号**——若也需要，请另行提出。
+#### 整体不可用模型（模型锁池下方那张表）
+
+与上面的「模型锁池」**必须分清**：那张是**限流**（等就有），这张是**上游没有这个模型**（等不到）。混在一起会让运维对着一个永远不会自动恢复的模型等限流窗口过去。
+
+判据（`internal/pool/deadmodels.go`）：同一 realm 有 **≥2 个不同账号**都被上游明确回 `11102`「该后端无此模型」。三条边界：
+
+- **只凭上游阳性证据判死**，绝不从「远端目录里没有」反推——本仓模型目录是动态拉取 + 多级兜底的残表，缺一条可能只是拉取降级、企业口径差异或缓存没热，拿这种缺席当证据会静默下架一个能用的模型；
+- **`11158`（号型不允许）不参与提升**：那是账号类型权限差异，天然逐账号（几个个人号都撞不代表模型死了）；
+- 阈值按**不同账号数**而不是次数：同一个号连撞 10 次只说明它自己不行（该号的会话路由到了没有这个模型的集群）。
+
+命中后：`/v1/models` 不再列出、点名调用在**打上游之前**就 `400 model_unavailable`（不白占在途名额、不白轮转一圈）；两者共用 `Pool.DeadModel` 同一判据（各写一遍必然漂移，症状是「目录里不列了，点名调用却还能打到上游」）。表格给命中账号数 / 复检时刻 / 上游原话，支持逐条与一键恢复——恢复会**同时清掉各账号上该模型的 11102 负缓存**，否则「恢复了但请求永远挑不到号」，表现像是恢复没生效。24h 自动复检（模型重新上架是上游侧动作，我们无从感知），并随 `state.json` 持久化（重启即丢等于让整池把同一面墙重新撞一遍）。
 
 #### 暂停选号（`paused`，账号行按钮）
 
