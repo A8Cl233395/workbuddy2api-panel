@@ -391,6 +391,11 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 	if len(mi.Tags) > 0 {
 		entry["tags"] = mi.Tags
 	}
+	// 付费层级（issue #235）：官方 badge 原文，如 global「Pro Only」/ CN「订阅优先」。
+	// 只标注不过滤——层级是账号级属性，列表是全池共享的。
+	if mi.Tier != "" {
+		entry["tier"] = mi.Tier
+	}
 	if mi.Vendor != "" {
 		entry["vendor"] = mi.Vendor
 	}

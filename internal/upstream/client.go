@@ -1427,15 +1427,20 @@ type ModelInfo struct {
 	DefaultEffort string   // reasoning.defaultEffort（新模型键）或 reasoning.effort（老模型键）；空=未返回
 
 	// 模型目录全字段（models-full-fields）：
-	Description       string   // descriptionZh 中文描述
-	Credits           string   // credits 积分倍率原文（如 "x0.05"），仅展示不参与选号
-	Tags              []string // tags 模型标签（含 badge:限时免费 等）
-	Vendor            string   // vendor 厂商标识
-	IsDefault         bool     // isDefault 是否默认模型
-	SupportsReasoning bool     // supportsReasoning 是否支持推理
-	SupportsToolCall  bool     // supportsToolCall 是否支持工具调用
-	OnlyReasoning     bool     // onlyReasoning 是否纯推理模型
-	SupportsImages    bool     // 顶层 supportsImages（多模态能力，透出到 /v1/models）
+	Description string   // descriptionZh 中文描述
+	Credits     string   // credits 积分倍率原文（如 "x0.05"），仅展示不参与选号
+	Tags        []string // tags 模型标签（含 badge:限时免费 等）
+	// Tier /v3/config data.modelTiers 的官方标识文案（global「Pro Only」/ CN
+	// 「订阅优先」），空=不受限。只透文案不给布尔：海外是 Pro 专属（免费号调不通），
+	// 国内只是「优先调度」（能用，排队靠后），同一个 requiredUserType 两种语义，
+	// 一刀切成「不可用」会把国内这三个模型错标成禁选（issue #235）。
+	Tier              string
+	Vendor            string // vendor 厂商标识
+	IsDefault         bool   // isDefault 是否默认模型
+	SupportsReasoning bool   // supportsReasoning 是否支持推理
+	SupportsToolCall  bool   // supportsToolCall 是否支持工具调用
+	OnlyReasoning     bool   // onlyReasoning 是否纯推理模型
+	SupportsImages    bool   // 顶层 supportsImages（多模态能力，透出到 /v1/models）
 	// SupportsImagesSet 上游是否**显式**给过 supportsImages。缺失与显式 false 必须分开：
 	// 缺失 = 上游没声明这项能力（多为非对话/旁路模型），据此断言「不支持图片」是编造
 	// 能力事实，gateway_hint 只能退中性文案（见 hint.go）。
@@ -1843,6 +1848,45 @@ func promoActive(p *v3ModelPromotion, now time.Time) bool {
 	return true
 }
 
+// v3ModelTier /v3/config data.modelTiers 单条付费层级（issue #235 实测两域各一条）：
+// 一层级带一组 modelIds + 官方标识文案。只取 label —— requiredUserType 两域同值
+// （"standard"）语义却不同，不能拿来判「能不能调」，判了就会误标。
+type v3ModelTier struct {
+	Enabled  bool     `json:"enabled"`
+	Priority int      `json:"priority"`
+	ModelIDs []string `json:"modelIds"`
+	Badge    *struct {
+		Label string `json:"label"`
+	} `json:"badge"`
+}
+
+// applyModelTiers 给受限模型挂官方标识文案（同模型多条命中取 priority 最高）。
+// 只标注不过滤：一次 /v1/models 是全池共享的，而层级是账号级属性，在列表接口上
+// 没有「当前账号」，硬过滤会按池里最差的号降级掉所有人的选择。
+func applyModelTiers(out map[string]ModelInfo, tiers []v3ModelTier) {
+	if len(tiers) == 0 || len(out) == 0 {
+		return
+	}
+	best := map[string]int{}
+	for _, t := range tiers {
+		if !t.Enabled || t.Badge == nil || strings.TrimSpace(t.Badge.Label) == "" {
+			continue
+		}
+		for _, id := range t.ModelIDs {
+			mi, ok := out[id]
+			if !ok {
+				continue // 目录外模型（如已下架）不挂
+			}
+			if p, seen := best[id]; seen && p >= t.Priority {
+				continue
+			}
+			best[id] = t.Priority
+			mi.Tier = t.Badge.Label
+			out[id] = mi
+		}
+	}
+}
+
 // applyModelPromotions 把当前生效的优惠挂到目录条目：同模型多条命中取 priority
 // 最高（实测 glm-5.2 白天 badge-only(50) 与夜间五折(100) 靠 priority+daily 双轨
 // 切换）。无 discount 对象的条目也挂标签/说明（错峰类），PromoFactor 留 nil。
@@ -2084,6 +2128,10 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 				} `json:"ModelTrialBanner"`
 			} `json:"productFeaturesConfig"`
 			ModelPromotions []v3ModelPromotion `json:"modelPromotions"`
+			// ModelTiers 付费层级表（issue #235）：海外「Pro Only」= 专业版专属
+			// （免费号选了就报错），国内「订阅优先」= 仅排队优先。清单与文案都在这，
+			// 模型目录本身不会按账号权限裁剪。
+			ModelTiers []v3ModelTier `json:"modelTiers"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -2132,6 +2180,7 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	// 倍率，如 hy4-preview-f 的 x0.29），而 WorkBuddy 客户端显示的是生效价（试用/
 	// 折扣窗口内 factor 打折）——面板据此展示「生效价 + 标签 + 牌价」。
 	applyModelPromotions(out, env.Data.ModelPromotions)
+	applyModelTiers(out, env.Data.ModelTiers)
 
 	if len(out) == 0 {
 		return nil, fmt.Errorf("v3/config returned empty models")

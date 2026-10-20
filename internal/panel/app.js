@@ -876,6 +876,7 @@ function mdRowHtml(m, pr) {
     : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
   // 能力徽标：默认模型 / 工具调用 / 视觉 / 纯推理（上游目录全字段透出，缺失不显示）
   const caps = [];
+  if (m.tier) caps.push('<span class="tag warn" title="上游付费层级（' + esc(m.tier) + '）：切换模型前留意，免费账号可能调不通或排队靠后">' + esc(m.tier) + '</span>');
   if (m.image_generation) caps.push('<span class="tag ok">出图</span>');
   if (m.is_default) caps.push('<span class="tag ok">默认</span>');
   if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
