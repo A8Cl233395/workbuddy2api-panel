@@ -2176,9 +2176,9 @@ function usRow(name, sub, a, mid, withPerf, nameHtml) {
    账号 / 模型 / 域三张表此前各自占一个 box，页面纵向拉得很长且表头结构几乎一样。
    现在合成一个 box：表头由维度定义生成，行渲染复用 usRow，切换零请求。 */
 const US_DIMS = {
-  account: { key: 'by_account', title: '账号', withRealm: true, withPerf: true, span: 10 },
-  model: { key: 'by_model', title: '模型', withRealm: false, withPerf: false, span: 7 },
-  realm: { key: 'by_realm', title: 'realm', withRealm: false, withPerf: false, span: 7 },
+  account: { key: 'by_account', title: '账号', withRealm: true, withPerf: true, span: 11 },
+  model: { key: 'by_model', title: '模型', withRealm: false, withPerf: false, span: 8 },
+  realm: { key: 'by_realm', title: 'realm', withRealm: false, withPerf: false, span: 8 },
 };
 
 // usSortRows 按当前排序字段降序（默认合计 Token，最大者最相关）。
@@ -2198,7 +2198,7 @@ function usDimHead(dim) {
   return '<tr><th class="mark" aria-hidden="true"></th><th>' + esc(m.title) + '</th>' +
     (m.withRealm ? '<th>域</th>' : '') +
     '<th class="num">请求</th><th class="num">失败</th>' +
-    '<th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>' +
+    '<th class="num">Prompt</th><th class="num">缓存命中率</th><th class="num">Completion</th><th class="num">合计</th>' +
     (m.withPerf ? '<th class="num">均延迟</th><th class="num">均速率</th>' : '') +
     '</tr>';
 }
@@ -2641,7 +2641,7 @@ async function loadUsage() {
     $('usCreditHead').innerHTML = '';
     $('usDimTabs').innerHTML = usTabsHtml(US_DIM_TABS, usDim, null);
     $('usCreditTabs').innerHTML = usTabsHtml([['account', '按账号'], ['model', '按模型']], usCreditDim, null);
-    $('usDimBody').innerHTML = '<tr><td colspan="10" class="empty">读取用量失败</td></tr>';
+    $('usDimBody').innerHTML = '<tr><td colspan="11" class="empty">读取用量失败</td></tr>';
     $('usCreditBody').innerHTML = '<tr><td colspan="7" class="empty">读取用量失败</td></tr>';
   }
 }

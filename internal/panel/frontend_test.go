@@ -2032,3 +2032,58 @@ process.stdout.write(JSON.stringify({
 		}
 	}
 }
+
+// TestAppJSUsageDimColumnCounts 用量明细三个维度必须「表头格数 = 数据行格数 = 空态 colspan」。
+// issue #32：usRow 一直输出缓存命中率单元格，但 usDimHead 的表头漏了「缓存命中率」，
+// 导致 Completion 及其后所有列整体左移一格。此测试把三方计数钉死，防再次漂移。
+func TestAppJSUsageDimColumnCounts(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; usage dim column test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const hs = src.indexOf('function usRow');
+const he = src.indexOf('/* usTabsHtml');
+if (hs < 0 || he < 0) throw new Error('usRow/usDimHead not found');
+const ctx = { Number, String, RegExp, Math, Array, Object };
+vm.createContext(ctx);
+vm.runInContext(
+  src.slice(hs, he) +
+  '\nconst esc = s => String(s);' +
+  '\nconst fmtTok = n => String(n);' +
+  '\nconst fmtMs = n => String(n);' +
+  '\nconst fmtRate = n => String(n);' +
+  '\nconst fmtHit = () => "50%";' +
+  '\nconst usMixBar = () => "";' +
+  '\nthis.usRow = usRow; this.usDimHead = usDimHead; this.US_DIMS = US_DIMS;',
+  ctx
+);
+const count = html => (html.match(/<(td|th)\b/g) || []).length;
+const a = { requests: 1, errors: 0, prompt_tokens: 1, completion_tokens: 1, total_tokens: 2, avg_latency_ms: 1, avg_tokens_per_second: 1 };
+const out = {};
+for (const dim of ['account', 'model', 'realm']) {
+  const m = ctx.US_DIMS[dim];
+  const row = ctx.usRow('x', '', a, dim === 'account' ? '<td class=\"num\">cn</td>' : '', m.withPerf, '');
+  out[dim] = { head: count(ctx.usDimHead(dim)), row: count(row), span: m.span };
+}
+process.stdout.write(JSON.stringify(out));`
+	f, err := os.CreateTemp(t.TempDir(), "usdim-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("usage dim column test failed: %v\n%s", err, out)
+	}
+	got := strings.TrimSpace(string(out))
+	const want = `{"account":{"head":11,"row":11,"span":11},"model":{"head":8,"row":8,"span":8},"realm":{"head":8,"row":8,"span":8}}`
+	if got != want {
+		t.Fatalf("usage dim counts=%s want %s", got, want)
+	}
+}
