@@ -132,6 +132,9 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **安全加固** | 常量时间密钥比较（`internal/httpauth`）、CSP 与安全响应头、UID 白名单防路径穿越、前端属性转义修复 |
 | **领养前置修复** | 上游 `travelAdopt` 缺 report 前置导致领养恒失败于 `first_buddy task not completed yet`；本分支修正后实测 +300 到账（3/3 账号） |
 | **原生工具调用标记还原** | 上游（DeepSeek 系）的工具调用原生语法是带全角竖线的标记文本，**仅在请求声明了 `tools` 时**才被上游解析成结构化 `tool_calls`。实测 `tools` 声明在中转环节（Responses → chat/completions 等）丢失是常态，此时模型仍想调工具，标记就以纯文本落进 `content`——Codex 这类只执行结构化 `function_call` 的客户端会把它当普通正文写进会话历史，回合直接结束、工具一次都没跑。网关在出站响应里识别并还原成 `tool_calls`（流式与非流式都覆盖，见下文） |
+| **零输出守卫** | 上游「收下请求却零输出」（HTTP 200 + `finish_reason=length` + 正文/思考/工具全空，典型成因：输入越过模型**真实**窗口，声明的 `context_length` 被虚报）此前被当成一次成功：客户端拿到空正文，网关零日志零计数，下一次照旧挑同一个号撞同一面墙。现在流式在**写出第一个字节之前**判出来（首帧否决窗口延长到首个**可见输出**帧，role 帧不提交响应头）→ 换号重发一次，客户端完全无痕；非流式在聚合体上判定，同样重发一次。全池都撞则如实回 `502 zero_output_length` + 可行动 hint（缩短输入 / 调大 `max_tokens`），**不罚账号、不冷却**（这是请求形态问题，不是账号健康问题） |
+| **整体不可用模型提升** | 11102「该后端无此模型」原是逐账号负缓存：模型整体下架时每个号都要白撞一次，期间 `/v1/models` 照旧列出它。现在同一 realm 有 **≥2 个不同账号**都被上游明确回 11102 → 记为整体不可用（**只凭上游阳性证据，绝不从「远端目录里没有」反推**；11158「号型不允许」是账号权限差异，不参与提升）→ `/v1/models` 不再列出、点名调用在打上游之前 `400 model_unavailable` 指去换模型；面板「整体不可用模型」单列一张表（与「模型锁池」分清：那是限流等就有，这是等不到），给命中账号数 / 复检时刻 / 上游原话 + 逐条与一键恢复（恢复同时清掉各号的 11102 负缓存，否则「恢复了但请求永远挑不到号」）。24h 自动复检，随 `state.json` 持久化 |
+| **账号备份 / 迁移** | 面板「添加账号 → 备份 / 迁移」：导出为自包含快照（凭据原文 + 备注 + realm + 企业 id + device token），支持**逐个勾选**子集；可选口令加密，**加密在浏览器侧完成**（PBKDF2-SHA256 200k + AES-GCM），口令与明文都不经过网关落盘与日志。导入两种模式取**白名单**（未知值一律 400，不静默回落）：`merge` **只增加**——池中已有的 uid 一个字节都不写（从别人的老备份导入不会用陈旧 token 打断本机活跃号）；`replace` 覆盖/新增，但**快照外的账号一律保留**（刻意不提供「整体替换」，删凭证不可逆）。判重三层：池内 uid → 文件内重复 uid → 规范化（trim + 小写）后重复。备份**不含**本机配置、模型黑名单、保留积分阈值、排程与告警设置，导出文件里用 `note` 写清这条 |
 
 ### 同步上游
 
@@ -402,7 +405,7 @@ curl -s http://localhost:7863/v1/responses \
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
-| `upstream.write_conversation_id` | `false` | **会话缓存槽回写**（issue #169）：客户端没在 body 带 `conversation_id` 时，把网关派生的会话键（与 `X-Conversation-ID` 头同源的 `buildCacheKey(uid, conv)`）写进出站 body。上游按 **body 该字段** 分前缀缓存槽，而 Claude Code / DSH 这类客户端从不带它——只注入 `prompt_cache_key` 不足以让上游复用同一槽（使用者侧实测 `hy4-preview-f` 36% 请求整段未命中）。官方桌面客户端**不发**该 body 字段（实测其 96MB 包内零命中）、且网关已恒发会话头，故默认关闭：多一个上游未预期字段属于改 body 形态（上游有 `messages[0].role` 这类 body 校验先例，见 issue #231）。打开前用 `internal/probe/probe169.go` 先做一次长前缀 A/B |
+| `upstream.write_conversation_id` | `false` | **会话缓存槽回写**（issue #169）：客户端没在 body 带 `conversation_id` 时，把网关派生的会话键（与 `X-Conversation-ID` 头同源的 `buildCacheKey(uid, conv)`）写进出站 body。上游按 **body 该字段** 分前缀缓存槽，而 Claude Code / DSH 这类客户端从不带它——只注入 `prompt_cache_key` 不足以让上游复用同一槽（使用者侧实测 `hy4-preview-f` 36% 请求整段未命中）。官方桌面客户端**不发**该 body 字段（实测其 96MB 包内零命中）、且网关已恒发会话头，故默认关闭：多一个上游未预期字段属于改 body 形态（上游有 `messages[0].role` 这类 body 校验先例，见 issue #231）。**2026-10-21 真机 A/B 结论：无效**——在官方 5.8.3 客户端自身通道上（渲染进程 `wb.http.post`，自带官方鉴权）对 6 个模型做「固定 conversation_id vs 不带」对照（两臂前缀内容不同，避免跨臂污染），命中率完全一致：`deepseek-v4.1-flash` 90.9/90.9、`glm-5.2` 99.9/99.9、`deepseek-v4-pro` 98.6/98.6；`hy4-preview`、`hy4-preview-exp`、`glm-5.3`（含 6.5k 长前缀）三组两臂**都是 0%**。即：上游前缀缓存按内容共享，与本字段无关；这几个模型是真的不返回缓存命中。字段本身**不被拒绝**（三发 200，随便填也行），所以开关保留但默认关闭，仅供后续复验 |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `models.hidden` | `[]` | 模型黑名单：`["deepseek-pro"]` 裸名隐藏两域，`["cn:legacy-model"]` / `["global:x"]` 只隐藏该域。**列表不列 + 点名调用直接拒绝**（`/v1/models` 过滤、`/v1/chat/completions` 与 `/v1/images/*` 拒绝）——只藏列表不够，知道名字仍可硬调。面板「模型黑名单」（逗号分隔）保存后**热生效** |
