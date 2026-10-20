@@ -676,6 +676,12 @@ func upsertTaskJobResult(job *TaskJob, taskCode string, result map[string]any) {
 	job.Results = append(job.Results, cloneResultMap(result))
 }
 
+// countCompletedTaskResults 统计本任务里「已完成」的任务数（进度条分子）。
+//
+// 两个来源都要算：
+//   - 白名单任务：有 result 即代表跑过（旧口径，保持）；
+//   - 白名单外任务（issue #174 的补领链路）：只有 status=done 才算完成——
+//     它们的存在形式是 claimOnlyAction，跑过但未达标/领奖失败不算进度。
 func countCompletedTaskResults(results []map[string]any) int {
 	known := make(map[string]struct{}, len(autoActions))
 	for _, result := range results {
@@ -684,6 +690,10 @@ func countCompletedTaskResults(results []map[string]any) int {
 			continue
 		}
 		if autoActionFor(code) != nil {
+			known[code] = struct{}{}
+			continue
+		}
+		if status, _ := result["status"].(string); status == "done" {
 			known[code] = struct{}{}
 		}
 	}

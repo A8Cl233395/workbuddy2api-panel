@@ -42,7 +42,11 @@ type autoAction struct {
 	TaskCode string // 目标任务 code
 	Desc     string // 展示用说明
 	Attempt  bool   // true = 尝试型（上游未证实可脚本化，跑了可能不点亮）
-	run      func(p *Panel, a *auth.Auth) (string, error)
+	// ClaimOnly 只领奖不做动作（issue #174）：白名单外的任务达标后没人领，积分就永久卡住。
+	// 执行器看到 progress 已达标直接 claim；未达标则跳过（"没有可执行的自动动作"），
+	// 不消耗对话配额、不发任何上游动作请求。
+	ClaimOnly bool
+	run       func(p *Panel, a *auth.Auth) (string, error)
 }
 
 const globalTaskWriteMessage = "国际区任务暂仅支持查询，请在官方客户端操作"
@@ -205,6 +209,25 @@ func autoActionFor(code string) *autoAction {
 }
 
 // autoActionIndex 任务在 autoActions 中的顺序（队列执行按依赖序排；未知返回大值）。
+// claimOnlyAction 为「已达标但无自动化动作」的任务合成只领奖动作（issue #174）。
+// run == nil：不执行任何动作，执行器只在 progress 已达标时 claim。
+func claimOnlyAction(code string) *autoAction {
+	return &autoAction{TaskCode: code, Desc: "补领：已达标未领奖（无自动动作）", ClaimOnly: true}
+}
+
+// queuedActionFor 队列执行用的动作解析：白名单有动作就用白的；否则合成只领奖动作。
+//
+// 为什么不在入队前过滤：白名单外任务的「达标」判定要等扫描拿到 progress 才知道，
+// 而入队与执行共享同一份扫描结果（scanAccountGrowth → it.Growth）。合成动作后，
+// 未达标的任务在执行器里按「没有可执行的自动动作」跳过，等价于旧的入队过滤，
+// 但达标未领的那部分被捞回来了。
+func queuedActionFor(code string) *autoAction {
+	if a := autoActionFor(code); a != nil {
+		return a
+	}
+	return claimOnlyAction(code)
+}
+
 func autoActionIndex(code string) int {
 	for i := range autoActions {
 		if autoActions[i].TaskCode == code {

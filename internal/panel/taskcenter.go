@@ -98,8 +98,15 @@ func growthPending(t upstream.Task) bool {
 	if t.Locked {
 		return false
 	}
-	// 达标未领也入队。执行路径看到 current>=target 会直接领，不再做动作；
-	// 仅限有自动化动作的任务，否则队列执行时 autoActionFor 为 nil 会直接报错。
+	// 达标未领也入队（issue #174）：只要 progress 已达标就入队，执行路径看到
+	// current>=target 会直接 claim，不再做动作、不再消耗对话配额。白名单外的任务
+	// 在这一档靠 claimOnlyAction 合成只领奖动作——此前它被 autoActionFor 过滤掉，
+	// 白名单外任务即使达标也永远领不到（积分卡在 2000/2100/2300 上不去）。
+	tt := t
+	if taskProgressReached(&tt) {
+		return true
+	}
+	// 未达标：必须有自动化动作，否则入队也只会空转。
 	return autoActionFor(t.TaskCode) != nil
 }
 
@@ -529,7 +536,8 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 // runGrowthQueued 与单任务和 auto_all 共用完成判据（executeAutoTask），
 // 保留未入账（awaiting_progress）/领奖待重试（claim_pending）状态。
 func (p *Panel) runGrowthQueued(a *auth.Auth, code string) autoTaskOutcome {
-	act := autoActionFor(code)
+	// queuedActionFor：白名单外但已达标的任务走合成的只领奖动作（issue #174）。
+	act := queuedActionFor(code)
 	if act == nil {
 		return autoTaskOutcome{Status: "error", Message: fmt.Sprintf("任务 %s 无自动动作", code)}
 	}
