@@ -76,7 +76,9 @@ def agent(task, timeout):
         code = 124 if (p.returncode is None or p.returncode < 0) else p.returncode
         keep = (out.strip().splitlines() or [""])[-3:]
         tail = " / ".join(keep)[:300]
-        if code == 0 or "429" not in tail:
+        # 只看日志不看退出码：agent 吞掉 429 之后仍以 0 退出，按 code==0 放行
+        # 会把这轮当成「跑完了但没产出」（真踩过，17 片里 1 片这么挂的）。
+        if "429" not in out:
             return code, tail
         # 免费档是「允许突发 30、持续 10 RPM」：agent 一阵工具调用就会打满，
         # 退避要够长才能等到窗口滑过去，30→300s 封顶。
