@@ -4,9 +4,8 @@
 version: 2
 
 upstream:
-  # 逐个 clone 下来交给 agent 分析的对象。第一个是本仓的上游 fork，其余是参考实现。
+  # 逐个 clone 下来交给 agent 分析的对象。
   repos:
-    - linguo2625469/workbuddy2api-panel
     - ardeyouxipianyi/workbuddy2api-hub
     - yuechuya/WorkBuddy2API-Gateway
     - HUIdada1/AgentHub
@@ -14,7 +13,6 @@ upstream:
     - sheng-du0521/workbuddy2api
     - OHCJ099/BuddyHub
     - hj01857655/WorkBuddy2api
-    - Agent2API/agent2api
     - syan-anan/wb-syan
     - JackAIStudio/dsh-workbuddy-dual
     - smart-open/TraeWorkAssistant
@@ -25,7 +23,6 @@ upstream:
     - Yhx888/dsh-free-egg-credits
     - Costben/workbuddy2api
     - zr987459/workbuddy-app
-    - chenpiyanghappy/dsh-buddy-suite
     - bhh3349/workbuddy2api-prime
     - dhdbvcg/dsh-workbuddy-console
     - chengzhi-c/pi-desktop-wtq-pool
@@ -37,8 +34,6 @@ upstream:
     - 2861292267/DSH-Official-WorkBuddy-Credit-Proxy
     - ithtelab/workbuddy-manager
     - caigee-cmd/cli2api
-    - 241793/workbuddy2API
-    - majiabin2020/WorkMami
     - FireOpalus/dsh-workbuddy2api
     - NextAgentX/qoder-trae-workbuddy-switch
     - sofs2005/w2a
@@ -51,7 +46,6 @@ upstream:
     - wefewe/workbuddy2api
     - ChaYeWuu/dsh-hyperworkbuddy
     - wicm84266964/Buddy2api
-    - xiaofan6ya/workbuddy2api
     - HXX-ita/workbuddy-checkin
     - thintsing/agent-checkin
     - stevenwang288/WorkBuddy-Daily
@@ -61,7 +55,6 @@ upstream:
     - GeekFong/traework-checkin-assistant
     - jerry9692/dsh-workbuddy2api-panel
     - babygoton/WorkDaddy
-    - AndroidSix/dsh-multi-router
     - xbmaxx/cli2openai
     - csszyft/wb2api
     - PBY-CMYK/workbuddy-daily
@@ -72,7 +65,6 @@ upstream:
     - a1007479270/aidaka
     - fancylear/dsh-workbuddy-credits
     - Libra1337/Reso2api
-    - TanTaolov/workbuddy2api-panel
     - jin66god/workbuddy2api-panel
 
   # 每片 4 个仓串行：串行是硬要求（免费档 10 RPM 共享一个池），
