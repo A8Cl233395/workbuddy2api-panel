@@ -24,7 +24,9 @@ import (
 // dumpLimit 单文件封顶：请求体 + 响应体合计。
 const dumpLimit = 8 << 20
 
-// dumpRequestMax 请求体片段上限：足够看清 tools / messages 结构，又不至于吃掉整个配额。
+// dumpRequestMax 请求体片段上限默认值：足够看清 tools / messages 结构，又不至于
+// 吃掉整个配额。Client.DumpRequestMax 可覆盖（长会话把 tools 排在几百条 messages
+// 之后，默认值常在中途截断）。
 const dumpRequestMax = 1 << 18
 
 // dumpUpstream 在 DumpDir 为空时原样返回 rc（零开销、零行为变化）。
@@ -41,9 +43,13 @@ func (c *Client) dumpUpstream(rc io.ReadCloser, prepared []byte, a *auth.Auth) i
 		log.Printf("WARN: [upstream] dump open: %v", err)
 		return rc
 	}
+	reqMax := c.DumpRequestMax
+	if reqMax <= 0 {
+		reqMax = dumpRequestMax
+	}
 	head := prepared
-	if len(head) > dumpRequestMax {
-		head = head[:dumpRequestMax]
+	if len(head) > reqMax {
+		head = head[:reqMax]
 	}
 	f.Write([]byte("=== request ===\n"))
 	f.Write(head)

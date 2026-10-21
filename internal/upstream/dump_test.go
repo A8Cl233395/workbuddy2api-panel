@@ -47,3 +47,30 @@ func TestDumpUpstreamWritesRaw(t *testing.T) {
 		t.Fatalf("文件名不应含完整 UID: %s", files[0])
 	}
 }
+
+// DumpRequestMax 覆盖默认 256 KB 请求体上限：片段按配置截断，响应段不受影响。
+func TestDumpUpstreamRequestMaxOverride(t *testing.T) {
+	dir := t.TempDir()
+	c := New()
+	c.DumpDir = dir
+	c.DumpRequestMax = 16
+	raw := "data: [DONE]\n\n"
+
+	req := `{"model":"m","tools":[{"type":"function","function":{"name":"read_file"}}]}`
+	rc := c.dumpUpstream(io.NopCloser(strings.NewReader(raw)), []byte(req), nil)
+	io.Copy(io.Discard, rc)
+	rc.Close()
+
+	files, _ := filepath.Glob(filepath.Join(dir, "*.log"))
+	if len(files) != 1 {
+		t.Fatalf("期望 1 个 dump 文件，得到 %d", len(files))
+	}
+	b, _ := os.ReadFile(files[0])
+	s := string(b)
+	if !strings.Contains(s, req[:16]) || strings.Contains(s, `"read_file"`) {
+		t.Fatalf("请求段应截断到 16 字节，实际 %q", s)
+	}
+	if !strings.HasSuffix(s, raw) {
+		t.Fatalf("响应段不应受请求上限影响，实际 %q", s)
+	}
+}

@@ -779,6 +779,9 @@ type Client struct {
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
 	IdleTimeout time.Duration
 
+	// DumpRequestMax 落盘文件里出站请求体片段的上限（字节）；0 = 默认 256 KB。
+	// 见 dump.go。
+	DumpRequestMax int
 	// DumpDir 非空时把每次 chat 请求的出站报文与上游原始响应落盘（诊断用，
 	// 见 dump.go）。启动后只读，空 = 不落盘。
 	DumpDir string
