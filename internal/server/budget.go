@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 )
 
-// cstZone 与 scheduler 的 CST 日界同一口径。server 不 import scheduler。
-var cstZone = time.FixedZone("CST", 8*60*60)
-
-func cstDay(t time.Time) string { return t.In(cstZone).Format("2006-01-02") }
+// cstDay 上游自然日（CST）日键，口径统一在 internal/cst。
+func cstDay(t time.Time) string { return cst.Day(t) }
 
 // 突发/缓存闸的固定口径。issue #229：hy4-preview 这类模型 140k 上下文一次对话 20+
 // 积分、缓存率极低时，当日上限要烧到很晚才触发，来不及止血。
