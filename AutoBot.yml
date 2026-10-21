@@ -66,6 +66,14 @@ upstream:
     - fancylear/dsh-workbuddy-credits
     - Libra1337/Reso2api
     - jin66god/workbuddy2api-panel
+    - HanawaBanana/workbuddy2api
+    - CangShui/workbuddy-gateway
+    - yreidev/workbuddy2api-panel
+    - Practice019/multi2api
+    - zhangdailin/API-Console
+    - aimod-cc/agent2api
+    - orangeboyChen/codebuddy2api
+    - Zhengyuuuui/workbuddy2api
 
   # 每片 4 个仓串行：串行是硬要求（免费档 10 RPM 共享一个池），
   # 放大每片只为少付 setup 开销（每片一次 pip install ≈2 分钟）
