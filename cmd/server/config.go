@@ -173,6 +173,9 @@ type Config struct {
 		DeviceTokenFile string `json:"device_token_file"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// DumpDir 非空时把 chat 请求的出站报文 + 上游原始响应落盘（诊断用，见
+		// internal/upstream/dump.go）。默认空 = 不落盘：正文含用户提示词。
+		DumpDir string `json:"dump_dir"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -534,6 +537,9 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_DEVICE_TOKEN_FILE"); v != "" {
 		c.Upstream.DeviceTokenFile = v
+	}
+	if v := os.Getenv("WB2A_DUMP_UPSTREAM"); v != "" {
+		c.Upstream.DumpDir = v
 	}
 	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
