@@ -74,6 +74,14 @@ upstream:
     - aimod-cc/agent2api
     - orangeboyChen/codebuddy2api
     - Zhengyuuuui/workbuddy2api
+    - cty1735/wb-proxy
+    - mmqz/cpa-multi-plugins
+    - changexbc/workbuddy-switch
+    - 88lin/workbuddy-auto-signin
+    - baiyea/workbuddy2api-ui
+    - L0NE-6/WorkBuddy-Daily
+    - hawklithm/workbuddy2api
+    - AI-Good-Tool/workbuddy-api
 
   # 每片 4 个仓串行：串行是硬要求（免费档 10 RPM 共享一个池），
   # 放大每片只为少付 setup 开销（每片一次 pip install ≈2 分钟）
