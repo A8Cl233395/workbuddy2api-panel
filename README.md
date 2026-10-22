@@ -486,7 +486,7 @@ curl -s http://localhost:7863/v1/responses \
 1. **提示词体系**（解决 **system / developer 来源**的误报）：由 `prompt.mode` 控制
 2. **指纹脱敏**（兜底 **用户 / assistant 消息**里的指纹串）：由 `features.sanitize_blacklist_fingerprints` 控制
 
-开启指纹脱敏时，出站请求里出现的 `DeepSeek Harness`（DSH 客户端身份句里的品牌词）统一改写为 `DeepSeekRuntime`：上游按逐字匹配把这句话当成「非官方渠道调用」整单拦截（400 `11-128`），换一个词即绕过，语义不变。该规则与其它指纹同表，作用于所有消息角色（含 `passthrough`），同样受 `features.sanitize_blacklist_fingerprints` 总开关控制。
+开启指纹脱敏时，`DeepSeek Harness`（DSH 客户端身份句里的品牌词）改写为 `DeepSeekRuntime`：上游按逐字匹配把这句话当成「非官方渠道调用」整单拦截（400 `11-128`），换一个词即绕过，语义不变。作用域由 `features.sanitize_brand_scope` 控制：默认 `all`（所有消息角色，与既有行为一致，含 user / assistant / tool 历史与 `tool_calls` 参数）；设为 `identity` 时只改写 `system` / `developer`，其余角色按用户数据原样透传（实测 user 消息里的同名文本不触发拦截）。该规则与其它指纹同表，`passthrough` 模式同样生效，受 `features.sanitize_blacklist_fingerprints` 总开关控制。
 
 | 模式 | 语义 |
 |---|---|

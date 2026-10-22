@@ -193,6 +193,9 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// SanitizeBrandScope 身份类规则（品牌词）作用域："all" = 所有消息角色（默认，与上游既有行为一致）；
+		// "identity" = 仅 system/developer，其余角色按用户数据原样透传（features.sanitize_brand_scope）。
+		SanitizeBrandScope string `json:"sanitize_brand_scope"`
 	} `json:"features"`
 
 	Models struct {
@@ -384,6 +387,7 @@ func Default() *Config {
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
+	c.Features.SanitizeBrandScope = "all"
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	c.Pool.MaxInFlight = 3
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403 修复
@@ -563,6 +567,9 @@ func applyEnv(c *Config) {
 			c.Features.SanitizeBlacklistFingerprints = b
 		}
 	}
+	if v := os.Getenv("WB2A_SANITIZE_BRAND_SCOPE"); v != "" {
+		c.Features.SanitizeBrandScope = v
+	}
 	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {
 		c.Prompt.Mode = v
 	}
@@ -642,6 +649,7 @@ func (c *Config) EnvironmentManagedFields() []string {
 		{"WB2A_CLIENT_NAME", "upstream.client_name", ""}, {"WB2A_DEVICE_TOKEN", "upstream.device_token", ""},
 		{"WB2A_DEVICE_TOKEN_FILE", "upstream.device_token_file", ""}, {"WB2A_PASSTHROUGH_IP", "upstream.passthrough_ip", "bool"},
 		{"WB2A_SANITIZE_FINGERPRINTS", "features.sanitize_blacklist_fingerprints", "bool"},
+		{"WB2A_SANITIZE_BRAND_SCOPE", "features.sanitize_brand_scope", ""},
 		{"WB2A_PROMPT_MODE", "prompt.mode", ""}, {"WB2A_PROMPT_FILE", "prompt.file", ""},
 		{"WB2A_EXPIRING_SOON", "pool.expiring_soon", ""}, {"WB2A_PREFER_EXPIRING", "pool.prefer_expiring", "bool"},
 		{"WB2A_SCHEDULE_JITTER_MINUTES", "schedule.jitter_minutes", "int"},
@@ -885,6 +893,14 @@ func (c *Config) normalize() error {
 		if strings.TrimSpace(c.Admin.AuditFile) == "" {
 			c.Admin.AuditFile = "./data/admin_audit.log"
 		}
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Features.SanitizeBrandScope)) {
+	case "", "all":
+		c.Features.SanitizeBrandScope = "all"
+	case "identity":
+		c.Features.SanitizeBrandScope = "identity"
+	default:
+		return fmt.Errorf("features.sanitize_brand_scope: %q 非法（all = 所有消息角色；identity = 仅 system/developer）", c.Features.SanitizeBrandScope)
 	}
 	if err := c.normalizeAlerting(); err != nil {
 		return err
