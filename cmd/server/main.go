@@ -345,6 +345,8 @@ func main() {
 		RequestLog: requestLog,
 		Upstream:   up,
 		Scheduler:  sch,
+		// 降级路由表：面板据此在限流提示里标注「已路由至 <等价模型>」。
+		ModelFallback: func() map[string]string { return live.Load().ModelFallback },
 		// 余额趋势采样记录器：nil 时该视图返回 501。
 		Balance: bal,
 		// 后台任务的自动触发开关与成长任务排程共用热配置（schedule.growth_enabled）。

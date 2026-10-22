@@ -76,6 +76,10 @@ type Config struct {
 	ProbeFile string
 	// Balance 余额趋势采样记录器（nil = 该视图返回 501）
 	Balance *balance.Recorder
+	// ModelFallback 模型降级路由表（读 live 快照，支持热更）。nil = 未配置。
+	// 面板据它在限流提示里标注「已路由至 X」—— 否则用户看到「v4.1 限流」
+	// 会以为服务断了，实际请求已被自动改道到等价模型继续服务。
+	ModelFallback func() map[string]string
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -308,7 +312,9 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"disabled":        disabled,
 		"paused":          paused,
 		"in_flight_full":  inFlightFull,
-		"accounts":        p.cfg.Pool.List(),
+		// 模型降级路由表：前端据它标注「⤳ 已路由至 X」（限流的模型若配了等价模型）。
+		"model_fallback": p.modelFallbackSnapshot(),
+		"accounts":       p.cfg.Pool.List(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久，移植上游
 		// PR #120）：与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
@@ -1268,4 +1274,13 @@ func (p *Panel) modelToggle(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "uid": uid, "model": model, "off": req.Off,
 		"list": p.cfg.Pool.ModelOffOf(uid),
 	})
+}
+
+// modelFallbackSnapshot 返回当前降级路由表（nil 安全）。
+// 走回调而非持有 map：live 快照会随面板保存配置替换，持有旧 map 会读到过期表。
+func (p *Panel) modelFallbackSnapshot() map[string]string {
+	if p.cfg.ModelFallback == nil {
+		return nil
+	}
+	return p.cfg.ModelFallback()
 }
