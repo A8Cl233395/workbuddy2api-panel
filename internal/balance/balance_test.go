@@ -3,6 +3,7 @@ package balance
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -171,10 +172,14 @@ func TestPersistAndReload(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("文件未生成: %v", err)
 	}
-	// 权限 0600（含账号数据）
-	fi, _ := os.Stat(path)
-	if fi.Mode().Perm() != 0o600 {
-		t.Errorf("权限 = %o, 期望 600", fi.Mode().Perm())
+	// 权限 0600（含账号数据）。Windows 上 os.Chmod 只映射只读位，Mode().Perm() 恒为
+	// 0666，该断言只在 POSIX 有意义（与 internal/auth/permhint_test.go、
+	// internal/credithist/fault_test.go 同口径）。
+	if runtime.GOOS != "windows" {
+		fi, _ := os.Stat(path)
+		if fi.Mode().Perm() != 0o600 {
+			t.Errorf("权限 = %o, 期望 600", fi.Mode().Perm())
+		}
 	}
 
 	r2 := New(path)
