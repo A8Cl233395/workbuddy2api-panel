@@ -76,6 +76,10 @@ type Config struct {
 	ProbeFile string
 	// Balance 余额趋势采样记录器（nil = 该视图返回 501）
 	Balance *balance.Recorder
+	// ModelFallback 模型降级路由表（读 live 快照，支持热更）。nil = 未配置。
+	// 面板据它在限流提示里标注「已路由至 X」—— 否则用户看到「v4.1 限流」
+	// 会以为服务断了，实际请求已被自动改道到等价模型继续服务。
+	ModelFallback func() map[string]string
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -189,6 +193,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
+	// (账号 × 模型) 手动开关：运维显式禁用某账号的某模型（永久语义，仅手动解）。
+	// 与上游触发的临时冷却（6004/11102）正交，且手动优先。
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_toggle", p.withAuth(p.modelToggle))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
@@ -305,7 +312,9 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"disabled":        disabled,
 		"paused":          paused,
 		"in_flight_full":  inFlightFull,
-		"accounts":        p.cfg.Pool.List(),
+		// 模型降级路由表：前端据它标注「⤳ 已路由至 X」（限流的模型若配了等价模型）。
+		"model_fallback": p.modelFallbackSnapshot(),
+		"accounts":       p.cfg.Pool.List(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久，移植上游
 		// PR #120）：与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
@@ -1220,4 +1229,58 @@ func (p *Panel) balanceHistory(w http.ResponseWriter, r *http.Request) {
 		"days":   days,
 		"series": series,
 	})
+}
+
+// modelToggle 手动开关某 (账号, 模型) 组合。
+//
+// 语义：这是**人工意图**（永久），与 modelCooldowns（上游触发、临时、过期自动删）
+// 正交。手动关掉的组合自动机制不能恢复 —— 见 internal/pool/toggle.go 的说明。
+//
+// model 接受带前缀形式（cn:gpt-4）也接受裸名；入库前统一剥前缀，与出站口径一致
+// （上游只认裸名，且带前缀存会在模型改名/换域时对不上）。
+func (p *Panel) modelToggle(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if _, ok := p.cfg.Pool.Status(uid); !ok {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	var req struct {
+		Model string `json:"model"`
+		Off   bool   `json:"off"`
+		Note  string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		writeErr(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	// 剥 realm 前缀（与出站口径一致：上游只认裸名）
+	if i := strings.Index(model, ":"); i >= 0 {
+		model = model[i+1:]
+	}
+	if req.Off {
+		if !p.cfg.Pool.SetModelOff(uid, model, req.Note) {
+			writeErr(w, http.StatusBadRequest, "set model off failed")
+			return
+		}
+	} else {
+		p.cfg.Pool.SetModelOn(uid, model)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "uid": uid, "model": model, "off": req.Off,
+		"list": p.cfg.Pool.ModelOffOf(uid),
+	})
+}
+
+// modelFallbackSnapshot 返回当前降级路由表（nil 安全）。
+// 走回调而非持有 map：live 快照会随面板保存配置替换，持有旧 map 会读到过期表。
+func (p *Panel) modelFallbackSnapshot() map[string]string {
+	if p.cfg.ModelFallback == nil {
+		return nil
+	}
+	return p.cfg.ModelFallback()
 }
