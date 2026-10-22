@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 )
 
 // TestSecondCreditsIssue222 企业「不限量」的 1<<40 哨兵不得充当权重分母（issue #222）。

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/misakano7545/workbuddy2api-panel/internal/cst"
+	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 )
 
 // TestSpreadDeterministic 同一天同一任务同一批账号 → 偏移不变（重启不重排）。
