@@ -1355,16 +1355,26 @@ func (p *Panel) accountProbeBan(w http.ResponseWriter, r *http.Request) {
 	// 网关 401 的响应体是 APISIX 的 HTML 页，**封禁（11140）与登录失效看起来完全一样**，
 	// 单看 401 分不出来。refresh 才是权威判词：refresh 成功 = 会话仍活（那 401 就是
 	// 风控拦截，含 11140 封禁）；refresh 被明确拒绝 = 登录态真失效。
+	// 网关 401 的求证与 chat 路径同一套判据（upstream.VerifySessionByRefresh）：
+	// 封禁（11140）与登录失效的响应体都是 APISIX HTML 页，单看 401 分不出来。
 	if err != nil && isSessionDeadErr(err) {
-		if rerr := p.cfg.Upstream.RefreshToken(a); rerr == nil {
-			// 会话仍活：401 是风控/封禁拦截，不是登录失效。
+		switch p.cfg.Upstream.VerifySessionByRefresh(a) {
+		case upstream.VerifyAlive:
 			resp["verdict"] = "blocked"
 			resp["detail"] = err.Error()
 			resp["advice"] = "会话仍有效，但请求被上游风控拦截（可能仍是 11140 封禁）—— 继续观察，勿反复 revive"
 			log.Printf("panel: probe_ban uid=%s → 被拦截但会话有效（refresh ok）", uid)
 			writeJSON(w, http.StatusOK, resp)
 			return
+		case upstream.VerifyInconclusive:
+			resp["verdict"] = "inconclusive"
+			resp["detail"] = err.Error()
+			resp["advice"] = "refresh 未给出明确判词（网络/限流等），稍后再试"
+			log.Printf("panel: probe_ban uid=%s → 无明确结论", uid)
+			writeJSON(w, http.StatusOK, resp)
+			return
 		}
+		// VerifyDead：落到下面的 session_dead 分支。
 	}
 	switch {
 	case err == nil:

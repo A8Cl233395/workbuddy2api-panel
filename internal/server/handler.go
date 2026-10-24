@@ -1961,9 +1961,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			//
 			// 代价：每个网关 401 多一次 refresh 往返；refresh 轻量且 401 低频，另由下面
 			// 的软冷却兜住「同一账号每请求都来问一次」。
-			if acct := h.cfg.Pool.AuthByUID(uid); acct != nil && acct.RefreshTokenValue() != "" && h.cfg.Upstream != nil {
-				rerr := h.cfg.Upstream.RefreshToken(acct)
-				if rerr == nil {
+			if acct := h.cfg.Pool.AuthByUID(uid); acct != nil && h.cfg.Upstream != nil {
+				switch h.cfg.Upstream.VerifySessionByRefresh(acct) {
+				case upstream.VerifyAlive:
 					// 上游已轮换 RT：必须落盘，否则重启拿旧 RT 刷新 = 账号真死。
 					if serr := acct.SaveAtomicRetry(); serr != nil {
 						log.Printf("ERR: [server] 网关 401 后 refresh 成功但落盘失败: %v", serr)
@@ -1976,18 +1976,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 					log.Printf("INFO: [server] 账号 %s 网关 401 但 refresh 成功 → 瞬时拦截，不计 session dead",
 						logfmt.Label(uid, ""))
 					return
-				}
-				// 只有上游**应用层明确拒绝**才算 token 失效。refresh 端点同样挂在
-				// /v2/* 上，边缘瞬时拦截时它也回 HTML 页（401/403 无业务信封）——
-				// 那是「拦截」不是「判词」，计入就等于换个地方复发同一个误杀。
-				var re *upstream.Error
-				if !errors.As(rerr, &re) || re.Status >= 500 || re.Status == http.StatusTooManyRequests ||
-					upstream.IsGatewayUnauthorized(re.Status, re.Msg) || upstream.IsWafBlocked(re.Status, re.Msg) {
+				case upstream.VerifyInconclusive:
+					// refresh 未给出明确判词（网络/5xx/429/refresh 端点自身被拦）：
+					// 既不能判活也不能判死，只短退避。判死会在同一层再误杀一次。
 					h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "gateway 401 (refresh inconclusive)")
-					log.Printf("INFO: [server] 账号 %s 网关 401，refresh 未给出明确判词 → 不计 session dead: %v",
-						logfmt.Label(uid, ""), rerr)
+					log.Printf("INFO: [server] 账号 %s 网关 401，refresh 未给出明确判词 → 不计 session dead",
+						logfmt.Label(uid, ""))
 					return
 				}
+				// VerifyDead：落到下面的计死逻辑。
 			}
 			// reason 带上「次数 + 已 refresh 验证」两个事实：面板只显示这一行，
 			// 运维要能一眼判断是「刚发生」还是「反复出现」，以及「是否已排除网关抖动」。
