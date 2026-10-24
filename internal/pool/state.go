@@ -91,6 +91,7 @@ func (p *Pool) ReviveDisabled(uid string) {
 	if e, ok := p.byUID[uid]; ok && e.disabled {
 		e.disabled = false
 		e.reason = ""
+		e.disabledAt = time.Time{}
 		e.sessionDeadFails = 0
 		p.dirty.Store(true)
 	}
@@ -798,6 +799,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Cooling:              now.Before(e.until) || now.Before(e.breakerUntil),
 		SessionDeadFails:     e.sessionDeadFails,
 		Disabled:             e.disabled,
+		DisabledAt:           disabledAtRFC3339(e),
 		Paused:               e.paused,
 		SuccessCount:         e.successCount,
 		ErrTotal:             e.errTotal,
@@ -846,6 +848,15 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		}
 	}
 	return st
+}
+
+// disabledAtRFC3339 把 entry.disabledAt 转成对外字符串（零值返回空，JSON 里省略）。
+// 单独抽出来是为了两处一致：实时 statusOf 与持久化恢复后都要同一口径。
+func disabledAtRFC3339(e *entry) string {
+	if e.disabledAt.IsZero() {
+		return ""
+	}
+	return e.disabledAt.Format(time.RFC3339)
 }
 
 // modelCostsStatusLocked 收集账号的有效成本台账行（P1-anti-monopoly 可观测性）。

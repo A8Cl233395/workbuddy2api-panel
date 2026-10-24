@@ -299,6 +299,54 @@ function rateLimitMeta(row, now) {
   }
   return { model, kind, detail, title: title.join('\n') };
 }
+// disabledKind 把禁用 reason 归成「类别 + 语气 + 建议动作」。
+//
+// 为什么要分类而不是直接显示 reason：四种禁用成因的**处置方式完全不同** ——
+// 上游封禁要申诉、登录失效要重登、手动禁用要人来判断、12153 也是重登。
+// 只甩一行原始文本，运维得先读懂才敢动手；分成标签后「该做什么」一眼可见。
+// 判据按**优先级**匹配：11140/封禁类先判（最严重且处置唯一），再判登录失效。
+function disabledKind(reason) {
+  const r = String(reason || '').toLowerCase();
+  if (/11140|banned|restricted|request illegal/.test(r)) {
+    return { label: '上游封禁', tone: 'bad', action: '需在官方申诉，revive 无效' };
+  }
+  if (/refresh.*失败|refresh 验证失败/.test(r)) {
+    return { label: '登录失效', tone: 'bad', action: '需重新登录' };
+  }
+  if (/12153/.test(r)) {
+    return { label: '登录失效', tone: 'bad', action: '需重新登录' };
+  }
+  if (/401/.test(r)) {
+    return { label: '鉴权失败', tone: 'warn', action: '确认后重登或恢复' };
+  }
+  if (/manual|手动/.test(r)) {
+    return { label: '手动禁用', tone: 'warn', action: '随时可恢复' };
+  }
+  return { label: '已禁用', tone: 'warn', action: '' };
+}
+
+// acctStateOf 按 uid 从 overview 快照里取账号状态（禁用/暂停）。
+//
+// 为什么余额趋势要标：这张表每一行是一条**历史余额曲线**，它不会因为账号被封
+// 而消失——但读者不知道「这条线为什么从某天起不再更新」，会把「号被封了」误读成
+// 「这段时间没怎么用」。标出来才对得上。
+function acctStateOf(uid) {
+  const list = (overviewData && overviewData.accounts) || [];
+  return list.find(a => a && a.uid === uid) || null;
+}
+
+// disabledAge 禁用时长（「刚禁”和「禁了一周」处置优先级差很远）。
+function disabledAge(at) {
+  if (!at) return '';
+  const t = Date.parse(at);
+  if (!Number.isFinite(t)) return '';
+  const sec = Math.max(0, (Date.now() - t) / 1000);
+  if (sec < 60) return '刚刚';
+  if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前';
+  if (sec < 86400) return Math.floor(sec / 3600) + ' 小时前';
+  return Math.floor(sec / 86400) + ' 天前';
+}
+
 function rateLimitRowsHtml(rows, now) {
   const list = Array.isArray(rows) ? rows.filter(row => row && row.model) : [];
   if (!list.length) return '';
@@ -435,7 +483,17 @@ function renderAccounts(list) {
     // 此前这种中间态完全不可见，面板照样打「可用」（issue #215 复盘）。
     else if (s.session_dead_fails > 0) { cls = 'cool'; tag = '<span class="tag warn">疑似登录失效 · 待重登</span>'; }
     else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
-    const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
+    // 禁用原因分两行：类别+时长（谁来处置、多久了）/ 原始 reason（细节）。
+    // 不分行的话「上游封禁 · 3 天前」和一段长 reason 挤在同一行，扫视时读不出重点。
+    const dk = s.disabled ? disabledKind(s.reason) : null;
+    const dAge = s.disabled ? disabledAge(s.disabled_at) : '';
+    const note = s.reason
+      ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' +
+        (dk ? '<span class="tag ' + dk.tone + '" style="margin-right:6px">' + esc(dk.label) + '</span>' : '') +
+        (dAge ? '<span style="margin-right:6px">' + esc(dAge) + '</span>' : '') +
+        (dk && dk.action ? '<span>' + esc(dk.action) + '</span>' : '') +
+        '<div style="margin-top:2px;opacity:.85">' + esc(s.reason) + '</div></div>'
+      : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
     // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream
@@ -4210,7 +4268,18 @@ async function loadBalance() {
     const tb = $('bhAccBody');
     if (tb) tb.innerHTML = rows.length ? rows.map((s, i) =>
       '<tr><td class="mark"><i class="dot" style="background:' + BH_COLORS[i % BH_COLORS.length] + '"></i></td>' +
-      '<td>' + esc(s.name || s.uid.slice(0, 8)) + '</td>' +
+      (() => {
+        const a = acctStateOf(s.uid);
+        // 账号已禁用/暂停：名字后加小标签。曲线仍展示（历史数据有意义），
+        // 但要让读者知道「之后不再更新」的原因，否则会把断更误读成没在用。
+        const mark = !a ? ''
+          : a.disabled ? '<span class="tag bad" style="margin-left:6px">' + esc(disabledKind(a.reason).label) + '</span>'
+          : a.paused ? '<span class="tag warn" style="margin-left:6px">暂停选号</span>'
+          : '';
+        const nm = s.name || s.uid.slice(0, 8);
+        const tip = a && a.reason ? nm + ' · ' + a.reason : nm;
+        return '<td title="' + esc(tip) + '">' + esc(nm) + mark + '</td>';
+      })() +
       '<td class="num">' + fmtNum(s.current) + '</td>' +
       '<td class="num">' + fmtNum(s.min) + '</td>' +
       '<td class="num">' + fmtNum(s.max) + '</td>' +

@@ -1989,13 +1989,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 					return
 				}
 			}
-			if h.cfg.Pool.NoteSessionDeadWith(uid, gatewayUnauthorizedReason) {
-				log.Printf("WARN: [server] 账号 %s 连续 %d 次网关 401 且 refresh 判死 → 禁用，需重新登录",
+			// reason 带上「次数 + 已 refresh 验证」两个事实：面板只显示这一行，
+			// 运维要能一眼判断是「刚发生」还是「反复出现」，以及「是否已排除网关抖动」。
+			if h.cfg.Pool.NoteSessionDeadWith(uid, fmt.Sprintf(
+				"网关 401 × %d 且 refresh 验证失败（token 已确认失效）", pool.SessionDeadThreshold())) {
+				log.Printf("WARN: [server] 账号 %s 连续 %d 次网关 401 且 refresh 失败（token 确实失效）→ 禁用，需重新登录",
 					logfmt.Label(uid, ""), pool.SessionDeadThreshold())
 			}
 			return
 		}
-		h.cfg.Pool.Disable(uid, "12153 session dead")
+		h.cfg.Pool.Disable(uid, "上游 12153 session dead（业务码明说登录态失效，需重新登录）")
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。

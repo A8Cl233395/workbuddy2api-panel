@@ -756,8 +756,20 @@ func (p *Panel) accountDisable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	p.cfg.Pool.Disable(uid, "manual disable (panel)")
-	log.Printf("panel: disable uid=%s（人工禁用）", uid)
+	// reason 可选：面板人工禁用默认记「管理员操作」，但允许调用方指定真实原因
+	// （例：补录历史禁用、脚本按上游判定结果禁用）。不带则沿用默认文案。
+	reason := "面板手动禁用（管理员操作）"
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req) // 空 body/非法 JSON 不算错：保持默认
+	}
+	if v := strings.TrimSpace(req.Reason); v != "" {
+		reason = v
+	}
+	p.cfg.Pool.Disable(uid, reason)
+	log.Printf("panel: disable uid=%s（人工禁用）reason=%s", uid, reason)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
