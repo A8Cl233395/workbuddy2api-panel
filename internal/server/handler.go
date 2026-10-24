@@ -206,6 +206,7 @@ func NewHandler(cfg Config) *Handler {
 	// 见 busy.go 文件头）。本地按池台账算，不打上游。
 	h.mux.HandleFunc("POST /v2/chat/busy", h.withAuth(h.chatBusy))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	h.mux.HandleFunc("GET /v1/capacity", h.withAuth(h.capacity))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
@@ -341,6 +342,33 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"last_reject": budgetLastReject,
 			"day":         cstDay(time.Now()),
 		},
+	})
+}
+
+func (h *Handler) capacity(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if strings.TrimSpace(h.loadLive().APIKey) == "" {
+		writeOpenAIError(w, http.StatusUnauthorized, "authentication_error", "API key is required")
+		return
+	}
+	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	if model == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
+		return
+	}
+
+	realm, bareModel := resolveModel(model)
+	if target, ok := h.modelAlias(realm, bareModel); ok && target != "" {
+		realm, bareModel = resolveModel(target)
+	}
+	modelAvailable, poolAvailable := h.cfg.Pool.CapacityForModel(bareModel, realm)
+	if h.hiddenModel(realm, bareModel) {
+		modelAvailable = 0
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":                    model,
+		"model_available_accounts": modelAvailable,
+		"available_accounts":       poolAvailable,
 	})
 }
 
