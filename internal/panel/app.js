@@ -552,7 +552,8 @@ function renderAccounts(list) {
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>' +
         (personal ?
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' : '') +
-        (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
+        (frozen ? '<button class="xs ghost" data-a="probe_ban" data-u="' + esc(s.uid) + '" title="只读探测上游是否已解封：不 revive、不参与选号、不改任何状态">探活</button>' +
+                  '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
                 : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (personal ? '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额' : '退出选号，但照常保活 / 刷新额度') + '">暂停选号</button>')) +
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
@@ -634,6 +635,21 @@ $('accBody').addEventListener('click', async ev => {
     } else if (a === 'balance') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/balance', { method: 'POST' });
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');
+    } else if (a === 'probe_ban') {
+      // 只读探测：后端不改任何池状态，所以这里**不刷新** overview（没有变化）。
+      // 结论用 toast 说清处置动作，而不是只报一句「仍被封」——运维要知道下一步做什么。
+      const r = await api('accounts/' + encodeURIComponent(u) + '/probe_ban', { method: 'POST' });
+      const map = {
+        lifted: ['已解封，可以点「解冻」恢复使用', 'ok'],
+        still_banned: ['仍被封禁，继续等待（勿反复 revive，可能加重风控）', 'warn'],
+        blocked: ['会话仍有效，但被上游风控拦截（可能仍是封禁）—— 继续观察', 'warn'],
+        session_dead: ['不是封禁问题 —— 登录态失效，需重新登录', 'warn'],
+        inconclusive: ['探测无明确结论（网络/限流等），稍后再试', 'warn'],
+        unknown: ['无法探测：上游客户端未配置', 'err'],
+      };
+      const m = map[r.verdict] || [r.verdict + (r.detail ? '：' + r.detail : ''), 'warn'];
+      toast(m[0], m[1]);
+      return; // 探测不改变状态，跳过下面的 loadOverview
     } else if (a === 'revive') {
       await api('accounts/' + encodeURIComponent(u) + '/revive', { method: 'POST' });
       toast('已解冻', 'ok');
@@ -4226,9 +4242,20 @@ function renderBalanceFoot(rows, now, winDays) {
     ? '<td class="num" style="color:' + (v > 0 ? 'var(--ok)' : v < 0 ? 'var(--bad)' : 'inherit') + '">' +
       (v > 0 ? '+' : '') + fmtNum(v) + '</td>'
     : '<td class="num na">—</td>';
+  // 可用账号数：该域内**当前真正能干活**的账号（未禁用且未暂停）。
+  // 为什么放在合计行：「合计余额」是历史水位之和，可能包含已死号的残留 ——
+  // 只看余额会高估可用资源，必须并排给出「这些钱有几个号在扛」。
+  let usable = 0;
+  rows.forEach(s => {
+    const a = acctStateOf(s.uid);
+    if (!a) { usable += 1; return; } // 无状态记录：按可用计（不无端扣减）
+    if (!a.disabled && !a.paused) usable += 1;
+  });
   host.innerHTML = '<tr>' +
     '<td class="mark" aria-hidden="true"></td>' +
-    '<td>合计（' + esc(realmLabel(bhRealm)) + '）</td>' +
+    '<td>合计（' + esc(realmLabel(bhRealm)) + '）' +
+      '<span class="hint" style="margin-left:8px;color:var(--ink-3)">可用 ' + usable + '/' + rows.length + '</span>' +
+    '</td>' +
     '<td class="num">' + fmtNum(cur) + '</td>' +
     // 最低/最高不求和——见函数头注释
     '<td class="num na" title="各账号低谷不在同一时刻，不可相加">—</td>' +
@@ -4259,9 +4286,17 @@ async function loadBalance() {
     // 积分不同源、不可互换，相加得出的数没有意义（见 BH_REALMS 注释）。
     let total = 0, delta = 0;
     rows.forEach(s => { total += Number(s.current || 0); delta += Number(s.change || 0); });
+    // 可用账号数：未禁用且未暂停（口径与合计行一致，两处必须同源）。
+    let usableCount = 0;
+    rows.forEach(s => {
+      const a = acctStateOf(s.uid);
+      if (!a || (!a.disabled && !a.paused)) usableCount += 1;
+    });
     const st = $('bhStats');
     if (st) st.innerHTML =
       bhCard('账号', String(rows.length)) +
+      // 可用数单列：合计余额可能包含已死号的残留，必须并排看「几个号在扛这些分」。
+      bhCard('可用', String(usableCount) + '/' + String(rows.length), usableCount < rows.length ? 'bad' : '') +
       bhCard('当前合计', fmtNum(total)) +
       bhCard('窗口净变化', (delta > 0 ? '+' : '') + fmtNum(delta), delta > 0 ? 'ok' : delta < 0 ? 'bad' : '') +
       bhCard('采样点数', fmtNum(rows.reduce((a, s) => a + (s.points || []).length, 0)));
