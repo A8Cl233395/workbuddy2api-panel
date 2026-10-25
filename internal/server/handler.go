@@ -1587,6 +1587,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// quota：积分耗尽专用形态（429 + type/code 同为 insufficient_quota，OpenAI
 	// 自己的 quota 错误口径；客户端据此不重试）。
 	quota := false
+	// quotaCode 非 0 时用「上游业务码」形态回 429（code 透出上游的 6004/6000，
+	// message 装上游原文）：客户端本来就按业务码判能不能重试，包成 insufficient_quota
+	// 字符串反而让各家各猜一套（见 modelBlockAllQuota 分支）。
+	quotaCode := 0
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
@@ -1661,8 +1665,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		status, quota = http.StatusTooManyRequests, true
 		msg = hardCreditMessage
 		hint = upstream.GatewayHint(upstream.ErrHardCredit, "", upstream.HintContext{})
+	} else if ue == nil && modelBlockAllQuota(modelBlock) {
+		// 全池该模型的锁都是「用量配额」（6004/6000：上游明说用量已超出频率限制、
+		// 将在某时刻重置）。重置前重试**必然同样失败**，所以按配额语义回 429 + 上游
+		// 原文，且**不发 Retry-After**：客户端普遍把它当「睡多久」的指令（codebuddy
+		// CLI 直接 delayMs = retry-after×1000，不设上限），把几十分钟的冷却原样报
+		// 出去就是客户端静默挂起——比报错更难排查。
+		// 与下面 14003 的可重试分支互补：那个是瞬时繁忙（等就有效），这个是额度窗口
+		// （等到重置前都无效）。
+		status, quotaCode = http.StatusTooManyRequests, modelQuotaCode(modelBlock.Reason)
+		msg = "model usage limit reached on every account; retry after the quota window resets"
+		if s := strings.TrimSpace(modelBlock.Reason); s != "" {
+			msg = s // 上游原文（含 code 6004 / 重置时刻 / requestId）
+		}
+		hint = fmt.Sprintf("model_quota: %d account(s) hit this model's usage limit", modelBlock.Count)
+		if !modelBlock.Until.IsZero() {
+			hint += "; resets at " + modelBlock.Until.Format(time.RFC3339)
+		}
 	} else if modelBlock.Blocked && modelBlockIsTransient(modelBlock.Reason) {
-		// 全池该模型只是「忙 / 被上游限流」（14003 model busy、6004 rate limit），
+		// 全池该模型只是「忙」（14003：模型繁忙，等一等就好）；6004/6000 的用量配额
+		// 已在上面按不可重试处置，走到这里的是「等有意义」的那一类。
 		// 不是「这个模型不存在或这个号型不允许」——上游对这两种的处置完全不同：
 		// 忙是该等（官方客户端就是这么做的：查 /v2/chat/queue/status 排队），
 		// 而模型级 11102/11158 是换模型才有用。
@@ -1681,6 +1703,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if d := time.Until(modelBlock.Until); d > 0 {
 				secs := int(math.Ceil(d.Seconds()))
 				retryAfterSec = secs
+				if retryAfterSec > maxRetryAfterSec {
+					retryAfterSec = maxRetryAfterSec // 头是「睡多久」的指令，见常量注释
+				}
 				hint += fmt.Sprintf("; earliest unblock in %ds", secs)
 			}
 		}
@@ -1706,9 +1731,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if retryAfterSec > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSec))
 	}
-	if quota {
+	switch {
+	case quotaCode != 0:
+		writeModelQuotaError(w, quotaCode, msg, hint)
+	case quota:
 		writeOpenAIQuotaError(w, msg, hint)
-	} else {
+	default:
 		writeOpenAIErrorHint(w, status, code, msg, hint)
 	}
 	st.status = status
@@ -1725,12 +1753,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 // 透传的场合；与 gateway_hint 并列，不重复 hint 的「等签到恢复」指向）。
 const hardCreditMessage = "all accounts have exhausted upstream credits; retry after credits are restored (daily check-in or add-on packs)"
 
+// maxRetryAfterSec Retry-After 上报上限（秒，10 分钟）。客户端普遍把该头当成
+// 「睡多久」的指令（codebuddy CLI 直接 delayMs = retry-after×1000，不设上限），
+// 把几十分钟的冷却原样报出去等于让客户端静默挂起；超过上限按上限报，到点重试
+// 再拿一次 503 即可（只是选号失败，不打上游）。
+const maxRetryAfterSec = 600
+
 // modelBlockIsTransient 判断模型级冷却的原因是「暂时忙/被限流」还是「确定性拒绝」。
 //
 // 依据是写冷却时存下的 Reason 原文（pool.CooldownModelBusy / CooldownSoftForModel
 // 写入，来源就是上游 body）：
 //   - 瞬时（可重试）：14003「模型繁忙」、6004「模型限流」；
 //   - 确定性（换模型才有效）：11102「该后端无此模型」、11158「号型不允许」。
+//
+// 6004/6000 的用量配额在调用点已先被 modelBlockAllQuota 判成不可重试，这里保留
+// 6004 标记只作兜底（如 6004 与 11102 混锁）。
 //
 // 两者此前都回 400 model_unavailable，等于把高峰期的一次忙判成「模型永久不可用」，
 // 客户端据此不重试——官方客户端同一时刻还在 /v2/chat/queue/status 排队（issue #24）。
@@ -1745,6 +1782,35 @@ func modelBlockIsTransient(reason string) bool {
 		}
 	}
 	return false
+}
+
+// modelBlockAllQuota 报告「全池该模型被挡」是否清一色是「用量配额」型：上游 6004/6000
+// 明说用量已超出频率限制、将在某时刻重置。这类锁在重置前重试必然同样失败，客户端
+// 该立刻报错（换模型/等额度），而不是像 14003 那样等着重试。
+//
+// 判据复用 upstream 既有分类：IsModelRateLimit 命中 6004/14003/6000，IsModelBusy
+// 只认 14003——「是模型级限流、但不是瞬时繁忙」即用量配额。锁因不是上游原文
+// （如本地标记串）时不认，保持旧的兜底行为。
+func modelBlockAllQuota(blk pool.ModelBlockStatus) bool {
+	if !blk.Blocked || len(blk.Reasons) == 0 {
+		return false
+	}
+	for _, r := range blk.Reasons {
+		if !upstream.IsModelRateLimit(r) || upstream.IsModelBusy(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// modelQuotaCode 返回锁因里的用量配额业务码：6000（kimi 系「用量频率限制」，
+// 带换模型提示）与 6004（「使用量已超出频率限制」）同族不同码，按原文区分。
+// 两者都是 modelBlockAllQuota 认可的形态，识别不到时按 6004 兜底。
+func modelQuotaCode(reason string) int {
+	if upstream.HasCodeMarker(reason, "6000") {
+		return 6000
+	}
+	return 6004
 }
 
 // tokensPerSecond 计算吐字速率（token/s），返回 (速率, 是否有意义)。（吸收上游 8b18ab8）
@@ -1903,9 +1969,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//     会把一个模型的抖动放大成整池停摆（实测同号换模型立刻可用）。
 		//   - 账号级（其余 429 文案）→ CooldownSoftRate：写账号级 until。
 		modelRateLimited := upstream.IsModelRateLimit(body)
+		// 模型级冷却的 reason 直接存上游原文（不是固定串）：面板要能看出「为什么锁」，
+		// 锁池命中时客户端也要拿到上游话术（6004「使用量已超出频率限制，将在 … 重置」）。
+		// 账号级冷却仍用下面的固定文案（那是"这个号被限流"，与模型无关）。
+		modelReason := "model rate limit"
+		if s := strings.TrimSpace(body); s != "" {
+			modelReason = s
+		}
 		if resetAt, ok := upstream.ParseRateReset(body); ok {
 			if modelRateLimited {
-				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, "model rate limit")
+				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, modelReason)
 				return
 			}
 			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
@@ -1925,7 +1998,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 				h.cfg.Pool.CooldownModelBusy(uid, model, "14003 model busy")
 				return
 			}
-			h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), retryAfter, model, "model rate limit")
+			h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), retryAfter, model, modelReason)
 			return
 		}
 		// 无重置时间 → 账号级有界退避（soft_rate 基数起、softStreak 翻倍、封顶
@@ -2129,6 +2202,23 @@ func writeOpenAIQuotaError(w http.ResponseWriter, msg, hint string) {
 		"message": msg,
 		"type":    "insufficient_quota",
 		"code":    "insufficient_quota",
+	}
+	if hint != "" {
+		e["gateway_hint"] = hint
+	}
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": e})
+}
+
+// writeModelQuotaError 全池该模型用量配额耗尽（6004/6000）专用响应：429 + 上游业务码。
+// code 用**数字**是刻意的：客户端是按数字业务码判「能不能重试」的（codebuddy CLI
+// 对 429 只重试 14003/6001/6002/6005/6006 这类瞬时速率码，6004 直接在黑名单外），
+// 写成 "insufficient_quota" 字符串会让它既认不出配额也认不出业务码。
+// type 仍标 insufficient_quota：OpenAI 口径里这就是「别重试，去等额度」。
+func writeModelQuotaError(w http.ResponseWriter, code int, msg, hint string) {
+	e := map[string]any{
+		"message": msg,
+		"type":    "insufficient_quota",
+		"code":    code,
 	}
 	if hint != "" {
 		e["gateway_hint"] = hint
