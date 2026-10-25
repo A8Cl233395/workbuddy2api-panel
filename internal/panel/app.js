@@ -1368,6 +1368,7 @@ const CFG_MAP = {
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
   models_hidden: ['models', 'hidden'],
+  models_allowed: ['models', 'allowed'],
   models_aliases: ['models', 'aliases'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
@@ -1424,7 +1425,8 @@ function collectConfig() {
     else {
       const raw = el.value.trim();
       // 逗号/空白分隔的列表字段：空 = 显式清空黑名单（空数组照发，否则删不掉条目）。
-      if (name === 'models_hidden') v = raw.split(/[,，\s]+/).filter(Boolean);
+      // 白名单同款语义（issue #68）：空串显式发空数组 = 关闭白名单。
+      if (name === 'models_hidden' || name === 'models_allowed') v = raw.split(/[,，\s]+/).filter(Boolean);
       // 模型映射（issue #30）："客户端名=真实名" 条目数组，同列表语义；空数组照发 = 清空。
       else if (name === 'models_aliases') v = raw.split(/[,，]+/).map(s => s.trim()).filter(Boolean);
       // 覆盖型字段空串照发（见 CLEARABLE_CFG）；其余空 = 不下发。
