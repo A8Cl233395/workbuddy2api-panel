@@ -850,8 +850,16 @@ func (s *Scheduler) runKeepalive(ctx context.Context, spread, selective bool) {
 			return // ctx 取消：剩余账号下轮再续
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
-			log.Printf("WARN: keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
+			// refresh token 失效 ≠ 账号不可用：AT 还没过期时 chat 仍正常（issue #83）。
+			// 这种号既不计 session dead（连续 3 次保活就会禁用掉健康号），也不打 WARN——
+			// 面板的错误汇总按 WARN 聚合，打 WARN 会让「保活失败」一直挂在页面上。
+			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && upstream.SessionDeadButUsable(a) {
+				log.Printf("INFO: keepalive %s: refresh token 已失效但 access token 仍有效，本轮跳过（对话仍可用）",
+					logfmt.Label(st.UID, st.Nickname))
+				continue
+			}
+			log.Printf("WARN: keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && !st.Disabled {
 				if s.cfg.Pool.NoteSessionDead(st.UID) {
 					log.Printf("WARN: keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())

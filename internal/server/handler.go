@@ -1126,20 +1126,27 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
 			if err := h.cfg.Upstream.RefreshTokenIfNeeded(acct, h.cfg.RefreshSkew); err != nil {
-				lastErr = err
 				var ue *upstream.Error
-				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+				// refresh token 失效 ≠ 账号不可用：AT 尚未过期时本请求仍会成功
+				// （issue #83 生产实测：refresh 恒 12153 的号 chat 仍 200）。
+				// 这种号不罚、也不换号——直接拿现有 AT 发这一次请求。
+				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && upstream.SessionDeadButUsable(acct) {
+					log.Printf("INFO: [server] 账号 %s refresh token 已失效但 access token 仍有效，用现有 token 继续",
+						logfmt.Label(acct.UID, acct.Nickname))
 				} else {
-					h.cfg.Pool.NoteError(acct.UID)
+					lastErr = err
+					if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
+						h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+					} else {
+						h.cfg.Pool.NoteError(acct.UID)
+					}
+					fail(acct.UID)
+					if !rotateBackoff(i, r.Context()) {
+						break // ctx 取消：终止轮转（refresh 失败换号退避）
+					}
+					continue
 				}
-				fail(acct.UID)
-				if !rotateBackoff(i, r.Context()) {
-					break // ctx 取消：终止轮转（refresh 失败换号退避）
-				}
-				continue
-			}
-			if err := acct.SaveAtomicRetry(); err != nil {
+			} else if err := acct.SaveAtomicRetry(); err != nil {
 				// 刷新成功但落盘失败：下次启动会用旧 token，必须暴露
 				log.Printf("ERR: [server] chat refresh acct=%s: save auth failed: %v", logfmt.Label(acct.UID, acct.Nickname), err)
 			}
