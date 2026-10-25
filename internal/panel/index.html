@@ -475,8 +475,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 10px; padding: 14px 17px 2px; }
   .kpis.k4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  @media (max-width: 1180px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-  @media (max-width: 700px) { .kpis, .kpis.k4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  /* k7：用量总览七张卡（含平均缓存命中率）。宽屏一行放下；中屏折 4 列（4+3），
+     窄屏与基础栅格一样 2 列。 */
+  .kpis.k7 { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  @media (max-width: 1180px) {
+    .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .kpis.k7 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  }
+  @media (max-width: 700px) { .kpis, .kpis.k4, .kpis.k7 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .kpi {
     position: relative; min-width: 0; overflow: hidden;
     background: var(--surface-2); border: 1px solid var(--line-soft);
@@ -1033,7 +1039,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="trange" id="usRange"></span>
           <button class="xs" id="btnUsage">刷新</button>
         </header>
-        <div class="kpis" id="usStats"></div>
+        <div class="kpis k7" id="usStats"></div>
         <div class="pad">
           <div class="uschart">
             <div class="uschart-hd">
