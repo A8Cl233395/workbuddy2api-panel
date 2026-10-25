@@ -1825,6 +1825,14 @@ func parseUsageTotalTokens(total float64) (int, bool) {
 	if math.IsNaN(total) || math.IsInf(total, 0) || total <= 0 || math.Trunc(total) != total {
 		return 0, false
 	}
+	// 越界判定必须在 int 转换之前用 float 比较：arm64 的 float→int 越界转换饱和
+	// （2^63 变成 MaxInt64），下面 float64(parsed) 的反向校验会被舍入等价骗过，
+	// 越界入参被放行（x86 上绕回负数能被 parsed<=0 拦住，故 Linux CI 复现不了，
+	// out_of_range_total 用例在 Apple Silicon 上必红）。token 数永远不会逼近 2^63，
+	// 前置拒绝零误伤。
+	if total >= float64(math.MaxInt64) {
+		return 0, false
+	}
 	parsed := int(total)
 	if parsed <= 0 || float64(parsed) != total {
 		return 0, false
