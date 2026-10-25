@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/cst"
+	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 )
 
 func (p *Pool) SetCredits(uid string, credits, total int64) {
@@ -593,6 +594,8 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	e.fails = 0
 	e.retryCount++
 	e.breakerUntil = time.Now().Add(d)
+	log.Printf("WARN: [pool] 熔断触发 acct=%s until=%s（退避 %s，第 %d 轮）——账号临时出池，期间不参与选号",
+		logfmt.Label(e.a.UID, e.a.Nickname), e.breakerUntil.Format(time.RFC3339), d, e.retryCount)
 }
 
 // CooldownUntilTomorrow4AM 冷却到下一个 04:00（CST：签到按上游自然日恢复）。
