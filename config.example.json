@@ -25,13 +25,27 @@
     "soft_rate_max": "2h"
   },
   "schedule": {
-    "checkin_hours": [9, 21],
-    "travel_hours": [9, 21],
-    "activity_hours": [10],
-    "keepalive_hours": [22],
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "travel_hours": [
+      9,
+      21
+    ],
+    "activity_hours": [
+      10
+    ],
+    "keepalive_hours": [
+      22
+    ],
     "keepalive_refresh_window": "168h",
-    "blackcat_hours": [23],
-    "growth_hours": [11],
+    "blackcat_hours": [
+      23
+    ],
+    "growth_hours": [
+      11
+    ],
     "checkin_enabled": true,
     "travel_enabled": true,
     "activity_enabled": true,
@@ -44,7 +58,10 @@
     "account_spread_min_gap_seconds": 0,
     "balance_refresh_enabled": true,
     "balance_refresh_minutes": 5,
-    "include_disabled_in_tasks": false
+    "include_disabled_in_tasks": false,
+    "balance_refresh_jitter_permill": 0,
+    "task_sweep_jitter_permill": 0,
+    "night_account_cap": 0
   },
   "global": {
     "enabled": true,
@@ -114,8 +131,14 @@
     "audit_enabled": false,
     "audit_file": "./data/admin_audit.log"
   },
-  "metrics": { "enabled": false },
-  "budget": { "daily_credit_limit": 0, "burst_credit_limit": 0, "cache_low_rate": 0 },
+  "metrics": {
+    "enabled": false
+  },
+  "budget": {
+    "daily_credit_limit": 0,
+    "burst_credit_limit": 0,
+    "cache_low_rate": 0
+  },
   "alerting": {
     "enabled": false,
     "webhook_url": "",

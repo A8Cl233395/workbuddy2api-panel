@@ -304,6 +304,13 @@ func main() {
 	case cfg.TaskSweepInterval > 0:
 		log.Printf("补领清扫：每 %s（只 accept 待接受的、只 claim 已达标未领的）", cfg.TaskSweepInterval)
 	}
+	if cfg.Schedule.BalanceRefreshJitterPermill > 0 {
+		log.Printf("周期抖动（人味化）：余额刷新 ±%d‰（账号遍历同步摊开）、补领清扫 ±%d‰，不再精确固定间隔（schedule.*_jitter_permill）",
+			cfg.Schedule.BalanceRefreshJitterPermill, cfg.Schedule.TaskSweepJitterPermill)
+	}
+	if cfg.Schedule.NightAccountCap > 0 {
+		log.Printf("夜间参与上限：夜猫子只让积分最高的前 %d 个号参加（schedule.night_account_cap）", cfg.Schedule.NightAccountCap)
+	}
 	if cfg.Schedule.IncludeDisabledInTasks {
 		log.Printf("保号任务覆盖禁用账号（schedule.include_disabled_in_tasks=true）：禁用号仍签到 / 活跃 / 保活 / 刷新余额，但不参与选号")
 	}
@@ -474,6 +481,8 @@ func main() {
 	defer pn.StopTaskJobs()
 	pn.ResumeTaskJobs()
 	go sch.Run(ctx)
+	sch.SetJitter(cfg.Schedule.BalanceRefreshJitterPermill, cfg.Schedule.TaskSweepJitterPermill)
+	sch.SetNightAccountCap(cfg.Schedule.NightAccountCap)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 	sch.StartTaskSweep(ctx, cfg.TaskSweepInterval)
 	if cfg.Alerting.Enabled {
@@ -770,6 +779,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	})
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetTaskSweepInterval(newCfg.TaskSweepInterval)
+	sch.SetJitter(newCfg.Schedule.BalanceRefreshJitterPermill, newCfg.Schedule.TaskSweepJitterPermill)
+	sch.SetNightAccountCap(newCfg.Schedule.NightAccountCap)
 	if pn != nil {
 		pn.SetGrowthConcurrency(newCfg.Schedule.GrowthConcurrency) // 排程轮次并发热生效
 	}
