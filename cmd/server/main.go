@@ -387,6 +387,7 @@ func main() {
 		StickyCount:      sessCount,
 		Version:          appVersion,
 		Updater:          updateManager,
+		PollIntervalSec:  cfg.Panel.PollIntervalSec,
 		Live:             live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。

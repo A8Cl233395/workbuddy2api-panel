@@ -50,6 +50,12 @@ type Config struct {
 	Version          string // 面板版本号（展示用）
 	Updater          *updater.Manager
 
+	// PollIntervalSec 前端自动刷新间隔（秒）。0 = 用前端缺省值。
+	// 面板每轮刷新会重建若干表格并打一批接口；账号多、或只是开着面板当监控用
+	// 时，把间隔调大（乃至关闭）能显著降低浏览器与服务端的负担。透出到
+	// /panel/api/overview 由前端读取。
+	PollIntervalSec int
+
 	// Live 运行期可变配置（在线改配置立即生效）。
 	Live *livecfg.Holder
 
@@ -313,18 +319,19 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		sticky = p.cfg.StickyCount()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":         p.cfg.Version,
-		"update":          p.updateSnapshot(),
-		"uptime_sec":      int(time.Since(p.started).Seconds()),
-		"auth_required":   p.apiKey() != "",
-		"redis_mode":      p.cfg.RedisMode,
-		"sticky_sessions": sticky,
-		"total":           total,
-		"healthy":         healthy,
-		"cooling":         cooling,
-		"disabled":        disabled,
-		"paused":          paused,
-		"in_flight_full":  inFlightFull,
+		"version":           p.cfg.Version,
+		"poll_interval_sec": p.cfg.PollIntervalSec,
+		"update":            p.updateSnapshot(),
+		"uptime_sec":        int(time.Since(p.started).Seconds()),
+		"auth_required":     p.apiKey() != "",
+		"redis_mode":        p.cfg.RedisMode,
+		"sticky_sessions":   sticky,
+		"total":             total,
+		"healthy":           healthy,
+		"cooling":           cooling,
+		"disabled":          disabled,
+		"paused":            paused,
+		"in_flight_full":    inFlightFull,
 		// 模型降级路由表：前端据它标注「⤳ 已路由至 X」（限流的模型若配了等价模型）。
 		"model_fallback": p.modelFallbackSnapshot(),
 		"accounts":       p.cfg.Pool.List(),
@@ -363,8 +370,52 @@ func (p *Panel) updateSnapshot() any {
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
 // archive_error：任务日志落盘故障（写失败不影响请求；前端可提示）。
+//
+// ?since=<RFC3339> 时只返回**该时刻之后**的条目（增量拉取）。面板「运行日志」页
+// 每 5 秒拉一次全量（500 行，~90KB），绝大多数轮次这 500 行根本没变。
+//
+// 语义与全量一致：响应仍是 {entries, archive_error}，前端把新条目追加到已有列表。
+// 游标过期时客户端自己做一次全量拉（环形缓冲淘汰最旧行时，被淘汰的行不会再来）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot(), "archive_error": p.logs.ArchiveError()})
+	entries := p.logs.Snapshot()
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		if since, ok := parseSinceParam(raw); ok {
+			filtered := entries[:0:0] // 新切片：不改 Snapshot 返回的底层数组
+			for _, e := range entries {
+				if e.TS.After(since) {
+					filtered = append(filtered, e)
+				}
+			}
+			entries = filtered
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "archive_error": p.logs.ArchiveError()})
+}
+
+// parseSinceParam 解析 ?since= 参数。
+//
+// 两种形态都要接受：
+//   - 标准 RFC3339（带时区偏移，如 2026-10-25T08:59:32.05+08:00）；
+//   - 偏移里的 "+" 被 URL 解码成空格（2026-...T08:59:32.05 08:00）——query
+//     string 里的 "+" 会被解成空格，而 RFC3339 的正偏移恰好用 "+" 表示。
+//
+// 失败一律回落全量（宁可多给不可少给），不报错。
+func parseSinceParam(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t, true
+	}
+	// "+" 被解成空格的形态：把第一个空格还原成 "+" 再试。
+	if i := strings.IndexByte(raw, ' '); i > 0 {
+		fixed := raw[:i] + "+" + raw[i+1:]
+		if t, err := time.Parse(time.RFC3339, fixed); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // errorSummary 把日志环里的 WARN/ERR 按「账号 × 类型」聚合（见 errors.go）。
@@ -383,12 +434,22 @@ func (p *Panel) errorSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestMetrics 返回进程内请求指标、最近 100 条与归档状态。
+//
+// ?recent=0 时**不返回** recent 数组（只回指标与归档状态）。面板「运行日志」页在
+// 归档开启时用归档数据当请求记录表（request_logs），recent 数组用不上——但它有
+// 100 条事件（~35KB），每 5 秒白拉一次、白解析一次、白 GC 一次。这里给前端一个
+// 显式开关，让它按需索取。
 func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.RequestLog == nil {
 		writeErr(w, http.StatusNotImplemented, "request logger not available")
 		return
 	}
-	writeJSON(w, http.StatusOK, p.cfg.RequestLog.Snapshot())
+	snap := p.cfg.RequestLog.Snapshot()
+	// 显式 "0"/"false" 才跳过；缺省保持原行为（recent 在），避免破坏既有调用方。
+	if v := r.URL.Query().Get("recent"); v == "0" || strings.EqualFold(v, "false") {
+		snap.Recent = nil
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // requestLogs 从 JSONL 归档读取最近请求；limit 默认 200、最大 1000。
