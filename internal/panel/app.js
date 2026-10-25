@@ -709,7 +709,11 @@ async function loadOverview(quiet) {
     renderModelLocks(d.model_locks);
     // 到期提醒随首页统计一起刷新：只用响应里已有的最早到期快照，零上游请求。
     renderExpirySnapshot(d);
-  } catch (e) { if (!quiet) toast(e.message, 'err'); }
+  } catch (e) {
+    // 轮询（quiet）时也留痕：渲染异常被静默吞掉的表现就是「统计正常、表格空白」
+    console.error('[panel] 首页刷新失败', e);
+    if (!quiet) toast(e.message, 'err');
+  }
 }
 
 $('accBody').addEventListener('click', async ev => {

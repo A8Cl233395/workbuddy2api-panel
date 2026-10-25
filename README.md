@@ -409,7 +409,18 @@ curl -s http://localhost:7863/v1/responses \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","input":"hi","stream":false}'
+
+# anthropic_messages（Claude Code / Anthropic SDK 原生协议，无需中间层翻译）
+# 客户端侧把 ANTHROPIC_BASE_URL 指到网关根（SDK 自己拼 /v1/messages）；
+# api_key 非空时两种鉴权头都认，选其一即可。
+curl -s http://localhost:7863/v1/messages \
+  -H "x-api-key: your-api-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
 ```
+
+`POST /v1/messages/count_tokens` **未实现**（404）：Claude Code 的上下文预算估算会退回本地字符估算，功能不受影响，但别把它当成网关故障。
 
 ## 配置说明
 
