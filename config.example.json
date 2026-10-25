@@ -44,7 +44,10 @@
     "account_spread_min_gap_seconds": 0,
     "balance_refresh_enabled": true,
     "balance_refresh_minutes": 5,
-    "include_disabled_in_tasks": false
+    "include_disabled_in_tasks": false,
+    "balance_refresh_jitter_permill": 0,
+    "task_sweep_jitter_permill": 0,
+    "night_account_cap": 0
   },
   "global": {
     "enabled": true,
