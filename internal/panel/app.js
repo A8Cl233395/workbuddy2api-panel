@@ -2684,8 +2684,10 @@ function renderUsage(d) {
   const okRate = reqs ? (reqs - errs) / reqs * 100 : null;
   // 构成条要的是合法 CSS 宽度，usPct 在无样本时返回 "—"，不能直接拼进 style。
   const pctW = (part) => total ? Math.max(0, Math.min(100, Number(part || 0) / total * 100)).toFixed(2) + '%' : '0%';
-  // 六张卡：主指标用强调色，completion 用成功色（与图表里的绿柱呼应），
+  // 七张卡：请求数 / 总 token / 平均缓存命中率是三张主指标（同一行，均用强调色），
+  // completion 用成功色（与图表里的绿柱呼应），
   // 失败/延迟只在有值时上语义色——全绿全黄的仪表盘等于没有重点。
+  const chTok = Number(t.cache_hit_tokens || 0), cmTok = Number(t.cache_miss_tokens || 0);
   $('usStats').innerHTML =
     usKpi(fmtTok(reqs), '请求数', 'c-accent',
       errs ? '其中失败 ' + errs + ' 次' : '全部成功') +
@@ -2693,6 +2695,8 @@ function renderUsage(d) {
       'prompt ' + usPct(pt, total) + ' · completion ' + usPct(ct, total),
       '<div class="kbar"><i style="width:' + pctW(pt) + ';background:var(--accent)"></i>' +
       '<i style="width:' + pctW(ct) + ';background:var(--ok)"></i></div>') +
+    usKpi(cacheRateText(chTok, cmTok), '平均缓存命中率', 'c-accent',
+      (chTok + cmTok) ? '命中 ' + fmtTok(chTok) + ' · 未命中 ' + fmtTok(cmTok) : '无缓存观测样本') +
     usKpi(fmtTok(pt), 'prompt', 'c-soft', '占比 ' + usPct(pt, total)) +
     usKpi(fmtTok(ct), 'completion', 'c-ok', '占比 ' + usPct(ct, total)) +
     usKpi(String(errs), '失败尝试', errs ? 'c-warn' : 'c-mute',
