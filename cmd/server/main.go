@@ -460,6 +460,7 @@ func main() {
 	if cfg.Admin.AuditEnabled {
 		al, aerr := server.NewAuditLog(cfg.Admin.AuditFile, cfg.APIKey)
 		if aerr != nil {
+			p.Flush() // Fatal 绕过 defer：至少把池状态落盘再退，否则丢整轮运行状态
 			log.Fatalf("admin audit: %v", aerr)
 		}
 		auditLog = al
@@ -506,6 +507,7 @@ func main() {
 	go updateManager.Run(ctx)
 	// 账号后台任务（taskjobs）：状态与主 state 同目录，重启后自动恢复未完成作业。
 	if err := pn.StartTaskJobs(ctx, stateSibling(cfg.StateFile, "task-jobs.json")); err != nil {
+		p.Flush() // Fatal 绕过 defer：至少把池状态落盘再退
 		log.Fatalf("task jobs: %v", err)
 	}
 	defer pn.StopTaskJobs()
@@ -565,9 +567,17 @@ func main() {
 		defer close(shutdownDone)
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 在途请求排干窗口可配（server.shutdown_timeout，缺省 30s）：长流式 SSE
+		// 合法时长可达分钟级，固定 5s 必然把在途请求掐成连接重置；超时不再静默。
+		shutdownTimeout := cfg.ShutdownTimeoutDur
+		if shutdownTimeout <= 0 {
+			shutdownTimeout = 5 * time.Second
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("WARN: 优雅关停未在 %s 内完成，在途请求被放弃: %v", shutdownTimeout, err)
+		}
 	}()
 
 	if warn := insecureKeyWarning(cfg.Listen, cfg.APIKey); warn != "" {
@@ -575,6 +585,7 @@ func main() {
 	}
 	log.Print(listenBanner(cfg.Listen, loadedFrom, cfg.APIKey))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		p.Flush() // 监听失败时信号路径不会跑：这里同样兜底落盘再退
 		log.Fatalf("http: %v", err)
 	}
 	if ctx.Err() != nil {
@@ -877,6 +888,7 @@ func restartRequiredFields(current, next *Config) []string {
 	changed("logging.request_retention_days", current.Logging.RequestRetentionDays, next.Logging.RequestRetentionDays)
 	changed("logging.request_archive_max_mb", current.Logging.RequestArchiveMaxMB, next.Logging.RequestArchiveMaxMB)
 	changed("server.read_timeout", current.Server.ReadTimeout, next.Server.ReadTimeout)
+	changed("server.shutdown_timeout", current.Server.ShutdownTimeout, next.Server.ShutdownTimeout)
 	return out
 }
 
