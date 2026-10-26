@@ -242,6 +242,14 @@ type Config struct {
 		// 生效点：GET /v1/models 列表过滤 + POST /v1/chat/completions 点名拒绝
 		// （只藏列表不够——知道名字仍可硬调）。面板保存后经 livecfg 热生效，无需重启。
 		Hidden []string `json:"hidden"`
+		// Allowed 对外暴露的模型白名单（issue #68）。条目语法与 Hidden 一致：
+		// 裸名=两域都允许；"cn:xxx"/"global:xxx"=只允许该域。空数组/未配置 =
+		// 白名单不启用（默认放行全部，向后兼容）。非空时仅白名单内模型可出现在
+		// /v1/models 并被点名调用，白名单外一律 400 拒绝（不打上游）。生效点在
+		// 别名映射之后（别名解析出的真实目标同样受检，不能绕过白名单）；与 Hidden
+		// 共存时取交集语义：Allowed 圈定「可能可见」集合，Hidden 仍可从中再剔除。
+		// 面板保存后经 livecfg 热生效，无需重启。
+		Allowed []string `json:"allowed"`
 		// Aliases 模型映射表（issue #30）："客户端名=真实模型名" 条目数组，与 Hidden
 		// 同存储形态（数组整体覆盖，面板删条目无需重启）。键：裸名=两域生效，
 		// "cn:x"/"global:x"=只在该域生效；键大小写不敏感。值可带 realm 前缀实现跨域
