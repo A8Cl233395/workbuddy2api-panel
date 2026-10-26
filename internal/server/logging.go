@@ -73,6 +73,11 @@ type chatStat struct {
 	clientIP  string
 	userAgent string
 
+	// toolsDeclared / toolCalls 本轮工具面观测量（issue #44）：声明数与实际调用数。
+	// 前者 >0 且后者 ==0 即「零工具调用收尾」，归档里可据此算发生率。
+	toolsDeclared int
+	toolCalls     int
+
 	// 上游调用分段耗时（见 upstream.ChatTiming）：prep 本地准备、do 上游往返。
 	// 零值 = 未测量（非流式/未走到上游）。
 	prep, do time.Duration
@@ -410,6 +415,19 @@ func usageDeltaFromResponse(resp map[string]any) pool.TokenUsageDelta {
 }
 
 // completionTokens 从 Aggregate 返回的响应中提取 usage.completion_tokens；缺失返回 -1。
+// toolCallCount 非流式聚合响应里的工具调用个数（issue #44 观测用）。
+// 只计数，不解析名字与参数。
+func toolCallCount(resp map[string]any) int {
+	choices, _ := resp["choices"].([]any)
+	if len(choices) == 0 {
+		return 0
+	}
+	ch, _ := choices[0].(map[string]any)
+	msg, _ := ch["message"].(map[string]any)
+	tcs, _ := msg["tool_calls"].([]any)
+	return len(tcs)
+}
+
 func completionTokens(resp map[string]any) int {
 	u, ok := resp["usage"].(map[string]any)
 	if !ok {
@@ -522,6 +540,8 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		if s.think >= 0 {
 			e.ReasoningTokens = int64(s.think)
 		}
+		e.ToolsDeclared = s.toolsDeclared
+		e.ToolCalls = s.toolCalls
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent
