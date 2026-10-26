@@ -1721,7 +1721,13 @@ function startAddLogin() {
       // 模块整数像素（4×）：非整数的 viewBox 缩放会把模块边缘糊成半像素，手机更难扫。
       $('addQr').innerHTML = qrSVG(M, (M.length + 8) * 4);
       $('addQr').hidden = false;
-    } catch (e) { $('addQr').hidden = true; }
+    } catch (e) {
+      // shortcut: 编码器到 v6（134 字节）为止；装了 CODEBUDDY_LOGIN_DEVICE_NONCE 的
+      // workbuddy 站链接 157 字节编不出来，再往上要补版本信息块，那时再升 v8。
+      // 但降级必须说出来 —— 静默不显示二维码会被当成 bug 反复报。
+      $('addQr').innerHTML = '<span class="note">链接过长，无法生成二维码，请用下方「复制链接」或「在浏览器打开」</span>';
+      $('addQr').hidden = false;
+    }
     $('addPick').hidden = true; // 选域锁定（会话已按该域发起）
     $('addLoad').hidden = true; $('addReady').hidden = false;
     $('btnStartLogin').hidden = true;
