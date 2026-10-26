@@ -27,6 +27,11 @@ func writeArchive(t *testing.T, dir string, days map[string][]string, unreadable
 	}
 }
 
+// cst8 期望值与夹具都用固定 +08:00：夹具里的事件写的就是 +08:00，期望值若跟宿主
+// 时区走，在 UTC 主机（CI runner）上会差 8 小时而假红——本机跑绿只是因为本机
+// 恰好是 CST。
+var cst8 = time.FixedZone("CST", 8*3600)
+
 func newArchiveForTest(t *testing.T, dir string) *archiveWriter {
 	return &archiveWriter{cfg: Config{Enabled: true, Dir: dir, RetentionDays: 30}, done: make(chan struct{})}
 }
@@ -44,14 +49,14 @@ func TestReadSkipsFilesOutsideWindow(t *testing.T) {
 		map[string]bool{"2026-01-01": true}, // 1 号档不可解析：被读过必报错
 	)
 	w := newArchiveForTest(t, dir)
-	rows, err := w.read(100, Filter{From: time.Date(2026, 1, 2, 12, 0, 0, 0, time.Local)})
+	rows, err := w.read(100, Filter{From: time.Date(2026, 1, 2, 12, 0, 0, 0, cst8)})
 	if err != nil {
 		t.Fatalf("窗口外文件不应被读取（读取会撞上不可解析行）: %v", err)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("窗口内应恰有 1 条事件, got %d", len(rows))
 	}
-	if !rows[0].Time.Equal(time.Date(2026, 1, 3, 10, 0, 0, 0, time.Local)) {
+	if !rows[0].Time.Equal(time.Date(2026, 1, 3, 10, 0, 0, 0, cst8)) {
 		t.Fatalf("应只返回窗口内事件, got %v", rows[0].Time)
 	}
 }
@@ -80,10 +85,10 @@ func TestReadStopsWhenLimitCollected(t *testing.T) {
 		t.Fatalf("want 2 rows, got %d", len(rows))
 	}
 	// read 返回最新在前。
-	if !rows[0].Time.Equal(time.Date(2026, 1, 3, 9, 0, 0, 0, time.Local)) {
+	if !rows[0].Time.Equal(time.Date(2026, 1, 3, 9, 0, 0, 0, cst8)) {
 		t.Fatalf("第一条应为全局最新事件, got %v", rows[0].Time)
 	}
-	if !rows[1].Time.Equal(time.Date(2026, 1, 3, 8, 0, 0, 0, time.Local)) {
+	if !rows[1].Time.Equal(time.Date(2026, 1, 3, 8, 0, 0, 0, cst8)) {
 		t.Fatalf("第二条应为次新事件, got %v", rows[1].Time)
 	}
 }
@@ -109,9 +114,9 @@ func TestReadFullScanUnchanged(t *testing.T) {
 		t.Fatalf("want 3 rows, got %d", len(rows))
 	}
 	want := []time.Time{
-		time.Date(2026, 1, 3, 10, 0, 0, 0, time.Local),
-		time.Date(2026, 1, 2, 10, 0, 0, 0, time.Local),
-		time.Date(2026, 1, 1, 10, 0, 0, 0, time.Local),
+		time.Date(2026, 1, 3, 10, 0, 0, 0, cst8),
+		time.Date(2026, 1, 2, 10, 0, 0, 0, cst8),
+		time.Date(2026, 1, 1, 10, 0, 0, 0, cst8),
 	}
 	for i, wt := range want {
 		if !rows[i].Time.Equal(wt) {
