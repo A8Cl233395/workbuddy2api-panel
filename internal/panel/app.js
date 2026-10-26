@@ -4845,12 +4845,16 @@ async function loadEvents() {
   const tb = $('eventTableBody');
   const limit = ($('eventFilterLimit') && $('eventFilterLimit').value) || 100;
   try {
-    const res = await api('request_logs?limit=' + limit).catch(() => ({ entries: [] }));
+    const res = await api('request_logs?limit=' + limit);
     rawEventsData = res.entries || [];
     populateEventFilterOptions(rawEventsData);
     renderEventTable();
   } catch (err) {
-    if (tb) setHTML(tb, '<tr><td colspan="14" style="text-align:center;padding:20px;color:var(--err);">读取失败: ' + esc(err.message || String(err)) + '</td></tr>');
+    // 不能把失败渲染成「共 0 条事件」——归档没开和查询出错是两回事，用户得知道是哪种。
+    rawEventsData = [];
+    if ($('eventBadge')) $('eventBadge').textContent = '读取失败';
+    if (tb) setHTML(tb, '<tr><td colspan="13" style="text-align:center;padding:20px;color:var(--err);">' +
+      (err.status === 501 ? '请求归档未开启，事件日志不可用' : '读取失败: ' + esc(err.message || String(err))) + '</td></tr>');
   }
 }
 
@@ -4896,7 +4900,7 @@ function renderEventTable() {
   if ($('eventBadge')) $('eventBadge').textContent = '共 ' + filtered.length + ' 条事件';
 
   if (!filtered.length) {
-    setHTML(tb, '<tr><td colspan="14" style="text-align:center;padding:30px;color:var(--ink-3);">没有符合筛选条件的请求事件</td></tr>');
+    setHTML(tb, '<tr><td colspan="13" style="text-align:center;padding:30px;color:var(--ink-3);">没有符合筛选条件的请求事件</td></tr>');
     return;
   }
 
@@ -4905,7 +4909,6 @@ function renderEventTable() {
     const tStr = isNaN(d) ? '-' : (String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0'));
     const dStr = isNaN(d) ? '' : (d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate());
 
-    const keyStr = 'Gra*********cle@1!';
     const acctRaw = e.account || '-';
     const acctClean = acctRaw.replace(/\([^)]*\)/, '');
     const mName = e.model || '-';
@@ -4919,7 +4922,7 @@ function renderEventTable() {
     }
 
     const reqProto = (e.mode === 'stream' || (e.path && e.path.includes('responses'))) ? 'SSE' : 'POST';
-    const reqPath = (e.path || '/chat').replace('/v1', '');
+    const reqPath = (e.path || '/chat').replace(/^\/v1/, '');
 
     const durSec = ((e.duration_ms || 0) / 1000).toFixed(1) + 's';
     const ttfbSec = e.ttfb_ms ? '首字延迟 ' + ((e.ttfb_ms) / 1000).toFixed(1) + 's' : '-';
@@ -4946,16 +4949,15 @@ function renderEventTable() {
 
     return '<tr>' +
       '<td class="time-cell"><div class="t-time">' + esc(tStr) + '</div><div class="t-date">' + esc(dStr) + '</div></td>' +
-      '<td><code class="key-code">' + esc(keyStr) + '</code></td>' +
       '<td><div class="acct-cell"><span class="acct-icon"></span><span title="' + esc(acctRaw) + '">' + esc(acctClean) + '</span></div></td>' +
-      '<td class="model-cell"><div class="m-name">' + esc(mName) + '</div><div class="m-resp">↳ 上游响应: ' + esc(mName.replace('global:', '')) + '</div></td>' +
+      '<td class="model-cell"><div class="m-name">' + esc(mName) + '</div></td>' +
       '<td><span class="pill-effort">' + esc(effort) + '</span></td>' +
       '<td>' + resTag + '</td>' +
       '<td><span class="req-tag">' + esc(reqProto) + '</span><div class="req-path-sub">' + esc(reqPath) + '</div></td>' +
       '<td><div class="metric-main">' + esc(durSec) + '</div><div class="metric-sub">' + esc(ttfbSec) + '</div></td>' +
       '<td><div class="metric-main">' + esc(tpsStr) + '</div></td>' +
       '<td class="token-cell"><div class="tok-total">' + esc(totTok) + '</div><div class="token-breakdown"><div class="token-breakdown-row"><span class="tok-in">↑ ' + esc(pTok) + '</span></div><div class="token-breakdown-row"><span class="tok-out">↓ ' + esc(cTok) + '</span> ' + thinkTok + '</div></div></td>' +
-      '<td class="cache-cell"><div class="cache-rate">' + esc(cRate) + '</div><div class="cache-breakdown"><div><span class="cache-hit">命中 ' + esc(formatEventNum(cHit)) + '</span></div><div><span class="cache-miss">写入 0</span></div></div></td>' +
+      '<td class="cache-cell"><div class="cache-rate">' + esc(cRate) + '</div><div class="cache-breakdown"><div><span class="cache-hit">命中 ' + esc(formatEventNum(cHit)) + '</span></div><div><span class="cache-miss">未命中 ' + esc(formatEventNum(cMiss)) + '</span></div></div></td>' +
       '<td><span class="executor-name">' + esc(exec) + '</span></td>' +
       '<td><code class="ip-mono">' + esc(ip) + '</code></td>' +
       '<td><div class="ua-cell" title="' + esc(ua) + '">' + esc(ua) + '</div></td>' +
@@ -4984,25 +4986,23 @@ function deriveEventExecutor(ua) {
   return 'WorkBuddyExecutor';
 }
 
-setTimeout(() => {
-  if ($('eventFilterModel')) $('eventFilterModel').onchange = renderEventTable;
-  if ($('eventFilterAccount')) $('eventFilterAccount').onchange = renderEventTable;
-  if ($('eventFilterStatus')) $('eventFilterStatus').onchange = renderEventTable;
-  if ($('eventFilterLimit')) $('eventFilterLimit').onchange = loadEvents;
-  if ($('btnEventClearFilters')) $('btnEventClearFilters').onclick = () => {
-    if ($('eventFilterModel')) $('eventFilterModel').value = '';
-    if ($('eventFilterAccount')) $('eventFilterAccount').value = '';
-    if ($('eventFilterStatus')) $('eventFilterStatus').value = '';
-    renderEventTable();
-  };
-  if ($('btnEventRefresh')) $('btnEventRefresh').onclick = loadEvents;
-  if ($('btnEventExport')) $('btnEventExport').onclick = () => {
-    const blob = new Blob([JSON.stringify(rawEventsData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'request-events-' + new Date().toISOString().slice(0, 10) + '.json';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-}, 100);
+if ($('eventFilterModel')) $('eventFilterModel').onchange = renderEventTable;
+if ($('eventFilterAccount')) $('eventFilterAccount').onchange = renderEventTable;
+if ($('eventFilterStatus')) $('eventFilterStatus').onchange = renderEventTable;
+if ($('eventFilterLimit')) $('eventFilterLimit').onchange = loadEvents;
+if ($('btnEventClearFilters')) $('btnEventClearFilters').onclick = () => {
+  if ($('eventFilterModel')) $('eventFilterModel').value = '';
+  if ($('eventFilterAccount')) $('eventFilterAccount').value = '';
+  if ($('eventFilterStatus')) $('eventFilterStatus').value = '';
+  renderEventTable();
+};
+if ($('btnEventRefresh')) $('btnEventRefresh').onclick = loadEvents;
+if ($('btnEventExport')) $('btnEventExport').onclick = () => {
+  const blob = new Blob([JSON.stringify(rawEventsData, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'request-events-' + new Date().toISOString().slice(0, 10) + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+};

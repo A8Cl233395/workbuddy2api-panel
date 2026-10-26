@@ -708,11 +708,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .event-table tbody tr:hover { background: rgba(0, 0, 0, 0.02); }
 .time-cell .t-time { font-weight: 600; color: var(--ink); font-size: 13px; line-height: 1.2; }
 .time-cell .t-date { font-size: 11px; color: var(--ink-3); margin-top: 3px; }
-.key-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--ink-2); background: var(--surface-2); padding: 3px 6px; border-radius: 5px; border: 1px solid var(--line); }
 .acct-cell { display: inline-flex; align-items: center; gap: 7px; font-weight: 500; }
 .acct-icon { width: 16px; height: 16px; border-radius: 50%; background: linear-gradient(135deg, #0284c7, #38bdf8); display: inline-block; flex-shrink: 0; }
 .model-cell .m-name { font-weight: 600; color: var(--ink); font-size: 12.5px; }
-.model-cell .m-resp { font-size: 11px; color: #ea580c; margin-top: 2px; }
 .tag-badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; text-align: center; }
 .tag-success { background: #dcfce7; color: #15803d; border: 1px solid rgba(22, 163, 74, 0.25); }
 .tag-warn { background: #fef3c7; color: #b45309; border: 1px solid rgba(217, 119, 6, 0.25); }
@@ -1485,7 +1483,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <thead>
               <tr>
                 <th style="min-width: 90px">时间</th>
-                <th style="min-width: 110px">API Key</th>
                 <th style="min-width: 180px">来源</th>
                 <th style="min-width: 180px">模型</th>
                 <th style="min-width: 75px">推理强度</th>
@@ -1501,7 +1498,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               </tr>
             </thead>
             <tbody id="eventTableBody">
-              <tr><td colspan="14" style="text-align: center; padding: 30px; color: var(--ink-3);">加载中...</td></tr>
+              <tr><td colspan="13" style="text-align: center; padding: 30px; color: var(--ink-3);">加载中...</td></tr>
             </tbody>
           </table>
         </div>
