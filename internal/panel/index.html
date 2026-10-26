@@ -381,6 +381,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   padding: 11px 13px; font: 12px var(--mono); word-break: break-all; color: var(--accent);
   margin: 8px 0 12px; user-select: all;
 }
+/* 授权链接二维码：手机/异地添加时链接经 IM 转发常被截断，扫码更可靠。二维码恒白底（见 qrSVG），深色主题下也能扫。 */
+.qrbox { display: flex; justify-content: center; margin: 0 0 12px; }
+.qrbox svg { border-radius: 6px; }
 .state { font-size: 13px; color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
 .state.ok { color: var(--ok); } .state.err { color: var(--bad); }
 .dots::after { content: "…"; animation: blink 1.2s steps(4) infinite; }
@@ -1545,8 +1548,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
         <div id="addLoad" class="state" hidden><span class="dots">正在获取授权链接</span></div>
         <div id="addReady" hidden>
-          <div class="state">在浏览器打开以下链接并登录：</div>
+          <div class="state">在浏览器打开以下链接并登录，或用手机扫码（15 分钟内有效，过期请关闭后重新添加）：</div>
           <div class="url" id="addUrl"></div>
+          <div class="qrbox" id="addQr" hidden></div>
           <div class="state" id="addPoll"><span class="dots">等待授权完成，自动检测中</span></div>
         </div>
         <div id="addDone" class="state ok" hidden></div>
