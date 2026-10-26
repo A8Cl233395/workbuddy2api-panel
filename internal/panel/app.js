@@ -449,7 +449,7 @@ $('btnLogout').onclick = () => {
 };
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', taskscenter: '任务中心', models: '模型与档位', config: '配置', events: '请求事件日志', logs: '运行日志' };
 function go(v) {
   navSet(false);
   view = v;
@@ -461,6 +461,7 @@ function go(v) {
   // 切到日志视图：本地窗口为空（首次）时全量拉一次；已有窗口则继续增量。
   // 注意**不要**在每次切视图时 resetLogWindow()——那会把增量游标清掉，下一轮
   // 又变成全量拉，白白丢掉增量带来的收益。
+  if (v === 'events') loadEvents();
   if (v === 'logs') { if (!logRows.length) resetLogWindow(); loadLogs(); }
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
@@ -4835,3 +4836,173 @@ function fmtTokens(n) {
   if (n >= 1e4) return (n / 1e4).toFixed(1) + ' 万';
   return String(n);
 }
+
+
+/* ── 请求事件日志 (Keeper 风格大屏) ────────────────────────────────── */
+let rawEventsData = [];
+
+async function loadEvents() {
+  const tb = $('eventTableBody');
+  const limit = ($('eventFilterLimit') && $('eventFilterLimit').value) || 100;
+  try {
+    const res = await api('request_logs?limit=' + limit).catch(() => ({ entries: [] }));
+    rawEventsData = res.entries || [];
+    populateEventFilterOptions(rawEventsData);
+    renderEventTable();
+  } catch (err) {
+    if (tb) setHTML(tb, '<tr><td colspan="14" style="text-align:center;padding:20px;color:var(--err);">读取失败: ' + esc(err.message || String(err)) + '</td></tr>');
+  }
+}
+
+function populateEventFilterOptions(list) {
+  const modelSel = $('eventFilterModel');
+  const acctSel = $('eventFilterAccount');
+  if (!modelSel || !acctSel) return;
+  const currModel = modelSel.value;
+  const currAcct = acctSel.value;
+
+  const models = new Set();
+  const accts = new Set();
+  list.forEach(e => {
+    if (e.model) models.add(e.model);
+    if (e.account) accts.add(e.account);
+  });
+
+  let mOpt = '<option value="">全部 (' + models.size + ')</option>';
+  models.forEach(m => mOpt += '<option value="' + esc(m) + '"' + (m === currModel ? ' selected' : '') + '>' + esc(m) + '</option>');
+  setHTML(modelSel, mOpt);
+
+  let aOpt = '<option value="">全部 (' + accts.size + ')</option>';
+  accts.forEach(a => aOpt += '<option value="' + esc(a) + '"' + (a === currAcct ? ' selected' : '') + '>' + esc(a) + '</option>');
+  setHTML(acctSel, aOpt);
+}
+
+function renderEventTable() {
+  const tb = $('eventTableBody');
+  if (!tb) return;
+  const modelFilter = ($('eventFilterModel') && $('eventFilterModel').value) || '';
+  const acctFilter = ($('eventFilterAccount') && $('eventFilterAccount').value) || '';
+  const statusFilter = ($('eventFilterStatus') && $('eventFilterStatus').value) || '';
+
+  let filtered = rawEventsData.filter(e => {
+    if (modelFilter && e.model !== modelFilter) return false;
+    if (acctFilter && e.account !== acctFilter) return false;
+    if (statusFilter === 'success' && !(e.ok || (e.status >= 200 && e.status < 300))) return false;
+    if (statusFilter === '429' && e.status !== 429) return false;
+    if (statusFilter === 'error' && (e.ok || (e.status >= 200 && e.status < 300))) return false;
+    return true;
+  });
+
+  if ($('eventBadge')) $('eventBadge').textContent = '共 ' + filtered.length + ' 条事件';
+
+  if (!filtered.length) {
+    setHTML(tb, '<tr><td colspan="14" style="text-align:center;padding:30px;color:var(--ink-3);">没有符合筛选条件的请求事件</td></tr>');
+    return;
+  }
+
+  const html = filtered.map(e => {
+    const d = new Date(e.time);
+    const tStr = isNaN(d) ? '-' : (String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0'));
+    const dStr = isNaN(d) ? '' : (d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate());
+
+    const keyStr = 'Gra*********cle@1!';
+    const acctRaw = e.account || '-';
+    const acctClean = acctRaw.replace(/\([^)]*\)/, '');
+    const mName = e.model || '-';
+    const effort = e.reasoning_effort || '-';
+
+    let resTag = '<span class="tag-badge tag-success">成功</span>';
+    if (e.status === 429) {
+      resTag = '<span class="tag-badge tag-warn">429 限流</span>';
+    } else if (e.status && (e.status < 200 || e.status >= 300)) {
+      resTag = '<span class="tag-badge tag-error">' + e.status + ' 错误</span>';
+    }
+
+    const reqProto = (e.mode === 'stream' || (e.path && e.path.includes('responses'))) ? 'SSE' : 'POST';
+    const reqPath = (e.path || '/chat').replace('/v1', '');
+
+    const durSec = ((e.duration_ms || 0) / 1000).toFixed(1) + 's';
+    const ttfbSec = e.ttfb_ms ? '首字延迟 ' + ((e.ttfb_ms) / 1000).toFixed(1) + 's' : '-';
+
+    let tpsStr = '-';
+    if (e.completion_tokens > 0) {
+      const genMs = Math.max(100, (e.duration_ms || 0) - (e.ttfb_ms || 0));
+      tpsStr = ((e.completion_tokens / genMs) * 1000).toFixed(1) + ' t/s';
+    }
+
+    const totTok = formatEventNum(e.total_tokens || 0);
+    const pTok = formatEventNum(e.prompt_tokens || 0);
+    const cTok = formatEventNum(e.completion_tokens || 0);
+    const thinkTok = e.reasoning_tokens > 0 ? ('<span class="tok-think" title="思考 Token">🧠 ' + formatEventNum(e.reasoning_tokens) + '</span>') : '';
+
+    const cHit = e.cache_hit_tokens || 0;
+    const cMiss = e.cache_miss_tokens || 0;
+    const cTot = cHit + cMiss;
+    const cRate = cTot > 0 ? ((cHit / cTot) * 100).toFixed(2) + '%' : '-';
+
+    const exec = e.executor_type || deriveEventExecutor(e.user_agent);
+    const ip = e.client_ip || '-';
+    const ua = e.user_agent || '-';
+
+    return '<tr>' +
+      '<td class="time-cell"><div class="t-time">' + esc(tStr) + '</div><div class="t-date">' + esc(dStr) + '</div></td>' +
+      '<td><code class="key-code">' + esc(keyStr) + '</code></td>' +
+      '<td><div class="acct-cell"><span class="acct-icon"></span><span title="' + esc(acctRaw) + '">' + esc(acctClean) + '</span></div></td>' +
+      '<td class="model-cell"><div class="m-name">' + esc(mName) + '</div><div class="m-resp">↳ 上游响应: ' + esc(mName.replace('global:', '')) + '</div></td>' +
+      '<td><span class="pill-effort">' + esc(effort) + '</span></td>' +
+      '<td>' + resTag + '</td>' +
+      '<td><span class="req-tag">' + esc(reqProto) + '</span><div class="req-path-sub">' + esc(reqPath) + '</div></td>' +
+      '<td><div class="metric-main">' + esc(durSec) + '</div><div class="metric-sub">' + esc(ttfbSec) + '</div></td>' +
+      '<td><div class="metric-main">' + esc(tpsStr) + '</div></td>' +
+      '<td class="token-cell"><div class="tok-total">' + esc(totTok) + '</div><div class="token-breakdown"><div class="token-breakdown-row"><span class="tok-in">↑ ' + esc(pTok) + '</span></div><div class="token-breakdown-row"><span class="tok-out">↓ ' + esc(cTok) + '</span> ' + thinkTok + '</div></div></td>' +
+      '<td class="cache-cell"><div class="cache-rate">' + esc(cRate) + '</div><div class="cache-breakdown"><div><span class="cache-hit">命中 ' + esc(formatEventNum(cHit)) + '</span></div><div><span class="cache-miss">写入 0</span></div></div></td>' +
+      '<td><span class="executor-name">' + esc(exec) + '</span></td>' +
+      '<td><code class="ip-mono">' + esc(ip) + '</code></td>' +
+      '<td><div class="ua-cell" title="' + esc(ua) + '">' + esc(ua) + '</div></td>' +
+    '</tr>';
+  }).join('');
+
+  setHTML(tb, html);
+}
+
+function formatEventNum(n) {
+  if (!n || n < 0) return '0';
+  if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(2) + 'K';
+  return String(n);
+}
+
+function deriveEventExecutor(ua) {
+  if (!ua) return 'WorkBuddyExecutor';
+  const l = ua.toLowerCase();
+  if (l.includes('antigravity')) return 'AntigravityExecutor';
+  if (l.includes('codex')) return 'CodexExecutor';
+  if (l.includes('claude')) return 'ClaudeCodeExecutor';
+  if (l.includes('cursor')) return 'CursorExecutor';
+  if (l.includes('continue')) return 'ContinueExecutor';
+  if (l.includes('openai') || l.includes('python')) return 'OpenAIClient';
+  return 'WorkBuddyExecutor';
+}
+
+setTimeout(() => {
+  if ($('eventFilterModel')) $('eventFilterModel').onchange = renderEventTable;
+  if ($('eventFilterAccount')) $('eventFilterAccount').onchange = renderEventTable;
+  if ($('eventFilterStatus')) $('eventFilterStatus').onchange = renderEventTable;
+  if ($('eventFilterLimit')) $('eventFilterLimit').onchange = loadEvents;
+  if ($('btnEventClearFilters')) $('btnEventClearFilters').onclick = () => {
+    if ($('eventFilterModel')) $('eventFilterModel').value = '';
+    if ($('eventFilterAccount')) $('eventFilterAccount').value = '';
+    if ($('eventFilterStatus')) $('eventFilterStatus').value = '';
+    renderEventTable();
+  };
+  if ($('btnEventRefresh')) $('btnEventRefresh').onclick = loadEvents;
+  if ($('btnEventExport')) $('btnEventExport').onclick = () => {
+    const blob = new Blob([JSON.stringify(rawEventsData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'request-events-' + new Date().toISOString().slice(0, 10) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+}, 100);
