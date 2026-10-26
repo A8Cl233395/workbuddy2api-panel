@@ -205,7 +205,9 @@ func NewHandler(cfg Config) *Handler {
 	// POST /v2/chat/busy：官方客户端的「模型忙」预检（国区上游 200、国际版上游 404，
 	// 见 busy.go 文件头）。本地按池台账算，不打上游。
 	h.mux.HandleFunc("POST /v2/chat/busy", h.withAuth(h.chatBusy))
-	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	// /v1/models 是双协议共用端点：Anthropic 官方 SDK 用 x-api-key，
+	// OpenAI 系客户端用 Bearer，两种携带方式都必须放行（见 withDualAuth）。
+	h.mux.HandleFunc("GET /v1/models", h.withDualAuth(h.models))
 	h.mux.HandleFunc("GET /v1/capacity", h.withAuth(h.capacity))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
