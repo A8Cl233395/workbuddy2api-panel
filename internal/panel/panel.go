@@ -197,6 +197,9 @@ type loginSession struct {
 	// processing 该 state 正在落盘（含签到/余额校验等副作用）。前端每 3s 轮询，而成功
 	// 分支的副作用可能耗时数秒：没有这个闸门，第二个并发 poll 会把整段流程再跑一遍。
 	processing bool
+	// lastMsg 上一次落日志的上游结果。前端每 3s 一轮、最长 loginTTL，逐轮记日志会
+	// 把 15 分钟刷成 300 行，真正的一次性错误反被淹掉；只在结果变化时记一行。
+	lastMsg string
 }
 
 // New 构建面板。
