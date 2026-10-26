@@ -686,11 +686,56 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .fl-dim { opacity: .62; }
 .fl-zero { color: var(--ink-3); }
 .fl-na { color: var(--ink-3); }
-  .bh-daylegend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
-  .bh-daylegend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+  .bh-daylegend { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .bh-daylegend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
   .bh-daylegend .lg-key { display: inline-flex; align-items: center; }
   .bh-daylegend .lg-sep { width: 1px; height: 12px; background: var(--line); }
   .bh-daylegend .lg-order { color: var(--ink-3); }
+
+/* ── 请求事件日志 (Keeper 风格大屏) ────────────────────────────────── */
+.events-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 16px 20px 12px; }
+.events-title-wrap h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 16px; font-weight: 600; }
+.events-title-wrap .subtext { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
+.events-badge { background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; font-size: 11.5px; font-weight: 500; color: var(--ink-2); }
+.events-filter-bar { display: flex !important; flex-direction: row !important; align-items: center !important; gap: 14px !important; padding: 12px 20px !important; border-bottom: 1px solid var(--line-soft) !important; flex-wrap: wrap !important; background: var(--surface); }
+.events-filter-group { display: inline-flex !important; align-items: center !important; gap: 6px !important; font-size: 12.5px; color: var(--ink-2); width: auto !important; margin: 0 !important; }
+.events-filter-group label { font-weight: 500; font-size: 12px; color: var(--ink-3); margin: 0; white-space: nowrap; }
+.events-filter-group select { width: auto !important; min-width: 140px !important; height: 32px; padding: 2px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-size: 12.5px; outline: none; }
+.event-tbl-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.event-table { width: 100%; min-width: 1520px; border-collapse: collapse; font-size: 12px; text-align: left; }
+.event-table th { padding: 11px 14px; font-weight: 600; color: var(--ink-3); border-bottom: 1px solid var(--line); font-size: 11.5px; white-space: nowrap; background: var(--surface-2); }
+.event-table td { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; white-space: nowrap; }
+.event-table tbody tr:hover { background: rgba(0, 0, 0, 0.02); }
+.time-cell .t-time { font-weight: 600; color: var(--ink); font-size: 13px; line-height: 1.2; }
+.time-cell .t-date { font-size: 11px; color: var(--ink-3); margin-top: 3px; }
+.key-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--ink-2); background: var(--surface-2); padding: 3px 6px; border-radius: 5px; border: 1px solid var(--line); }
+.acct-cell { display: inline-flex; align-items: center; gap: 7px; font-weight: 500; }
+.acct-icon { width: 16px; height: 16px; border-radius: 50%; background: linear-gradient(135deg, #0284c7, #38bdf8); display: inline-block; flex-shrink: 0; }
+.model-cell .m-name { font-weight: 600; color: var(--ink); font-size: 12.5px; }
+.model-cell .m-resp { font-size: 11px; color: #ea580c; margin-top: 2px; }
+.tag-badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; text-align: center; }
+.tag-success { background: #dcfce7; color: #15803d; border: 1px solid rgba(22, 163, 74, 0.25); }
+.tag-warn { background: #fef3c7; color: #b45309; border: 1px solid rgba(217, 119, 6, 0.25); }
+.tag-error { background: #fee2e2; color: #b91c1c; border: 1px solid rgba(220, 38, 38, 0.25); }
+.pill-effort { background: var(--surface-2); border: 1px solid var(--line); padding: 2px 7px; border-radius: 6px; font-size: 11.5px; color: var(--ink-2); font-weight: 500; }
+.req-tag { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; font-size: 12px; color: #0284c7; }
+.req-path-sub { font-size: 10.5px; color: var(--ink-3); margin-top: 2px; }
+.metric-main { font-weight: 600; color: var(--ink); font-size: 13px; }
+.metric-sub { font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+.token-cell .tok-total { font-weight: 600; color: var(--ink); font-size: 12.5px; }
+.token-breakdown { display: flex; flex-direction: column; gap: 2px; font-size: 11px; margin-top: 3px; }
+.token-breakdown-row { display: flex; gap: 8px; }
+.tok-in { color: #0284c7; font-weight: 500; }
+.tok-out { color: #16a34a; font-weight: 500; }
+.tok-think { color: #9333ea; font-weight: 500; }
+.cache-cell .cache-rate { font-weight: 600; color: var(--ink); font-size: 12.5px; }
+.cache-breakdown { display: flex; flex-direction: column; gap: 2px; font-size: 11px; margin-top: 3px; }
+.cache-hit { color: #d97706; font-weight: 500; }
+.cache-miss { color: var(--ink-3); }
+.executor-name { font-weight: 600; color: var(--ink); font-size: 12px; }
+.ip-mono { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--ink-2); }
+.ua-cell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--ink-3); cursor: help; }
+
 </style>
 </head>
 <body>
@@ -724,6 +769,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
+      <li><a href="#events" data-view="events">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="12" height="12" rx="2.5"/><path d="M5 5.5h6M5 8h6M5 10.5h3.5"/></svg>
+        请求事件日志</a></li>
       <li><a href="#logs" data-view="logs">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>
         运行日志</a></li>
@@ -1384,6 +1432,80 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button type="submit" class="primary" id="btnCfgSave">保存配置</button>
         </div>
       </form>
+    </section>
+
+    <!-- 请求事件日志 (Keeper 风格大屏) -->
+    <section class="view" id="view-events" hidden>
+      <div class="box">
+        <header class="events-header">
+          <div class="events-title-wrap">
+            <h3>请求事件日志 <span class="events-badge" id="eventBadge">共 0 条事件</span></h3>
+            <div class="subtext">筛选、查看并分析实时调用事件与性能指标（完全对齐 Keeper 风格）。</div>
+          </div>
+          <span class="grow"></span>
+          <div class="events-actions">
+            <button class="xs" id="btnEventExport" type="button">导出 JSON</button>
+          </div>
+        </header>
+
+        <div class="events-filter-bar">
+          <div class="events-filter-group">
+            <label for="eventFilterModel">模型</label>
+            <select id="eventFilterModel"><option value="">全部</option></select>
+          </div>
+          <div class="events-filter-group">
+            <label for="eventFilterAccount">来源</label>
+            <select id="eventFilterAccount"><option value="">全部</option></select>
+          </div>
+          <div class="events-filter-group">
+            <label for="eventFilterStatus">状态</label>
+            <select id="eventFilterStatus">
+              <option value="">全部</option>
+              <option value="success">成功</option>
+              <option value="429">429 限流</option>
+              <option value="error">错误</option>
+            </select>
+          </div>
+          <button class="xs ghost" id="btnEventClearFilters" type="button">清除筛选</button>
+          <span class="grow"></span>
+          <div class="events-filter-group">
+            <label for="eventFilterLimit">展示</label>
+            <select id="eventFilterLimit">
+              <option value="100" selected>最近 100 条</option>
+              <option value="300">最近 300 条</option>
+              <option value="500">最近 500 条</option>
+              <option value="1000">最近 1000 条</option>
+            </select>
+          </div>
+          <button class="xs primary" id="btnEventRefresh" type="button">刷新</button>
+        </div>
+
+        <div class="event-tbl-wrap">
+          <table class="event-table">
+            <thead>
+              <tr>
+                <th style="min-width: 90px">时间</th>
+                <th style="min-width: 110px">API Key</th>
+                <th style="min-width: 180px">来源</th>
+                <th style="min-width: 180px">模型</th>
+                <th style="min-width: 75px">推理强度</th>
+                <th style="min-width: 75px">结果</th>
+                <th style="min-width: 90px">请求</th>
+                <th style="min-width: 100px">延时</th>
+                <th style="min-width: 85px">生成速度</th>
+                <th style="min-width: 125px">Token</th>
+                <th style="min-width: 115px">缓存</th>
+                <th style="min-width: 140px">执行器</th>
+                <th style="min-width: 110px">客户端 IP</th>
+                <th style="min-width: 180px">用户代理</th>
+              </tr>
+            </thead>
+            <tbody id="eventTableBody">
+              <tr><td colspan="14" style="text-align: center; padding: 30px; color: var(--ink-3);">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <!-- 日志 -->

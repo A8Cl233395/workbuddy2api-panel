@@ -517,9 +517,15 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		// 缓存命中/未命中（issue #92 同步）：hasCache 未置位时为零值，omitempty 省略。
 		e.CacheHitTokens = int64(s.cacheHit)
 		e.CacheMissTokens = int64(s.cacheMiss)
+		e.Mode = s.mode
+		e.ReasoningEffort = s.effort
+		if s.think >= 0 {
+			e.ReasoningTokens = int64(s.think)
+		}
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent
+	e.ExecutorType = deriveExecutorType(t.userAgent)
 	if e.Outcome == "" {
 		if status >= 200 && status < 300 {
 			e.Outcome = reqlog.OutcomeSuccess
@@ -749,4 +755,32 @@ func (c *cacheMissSignal) noteCacheTokens(model string, prompt, hit, miss int64)
 	}
 	c.last[model] = now
 	log.Printf("WARN: [server] cache miss: model=%s 本次大前缀未命中（prompt=%d miss=%d，此前观测到过命中）；上游前缀缓存重算，费用会显著升高", model, prompt, miss)
+}
+
+func deriveExecutorType(ua string) string {
+	lower := strings.ToLower(ua)
+	switch {
+	case strings.Contains(lower, "antigravity"):
+		return "AntigravityExecutor"
+	case strings.Contains(lower, "codex"):
+		return "CodexExecutor"
+	case strings.Contains(lower, "claude"):
+		return "ClaudeCodeExecutor"
+	case strings.Contains(lower, "cursor"):
+		return "CursorExecutor"
+	case strings.Contains(lower, "continue"):
+		return "ContinueExecutor"
+	case strings.Contains(lower, "asyncopenai") || strings.Contains(lower, "openai") || strings.Contains(lower, "python"):
+		return "OpenAIClient"
+	case strings.Contains(lower, "curl") || strings.Contains(lower, "http"):
+		return "HTTPClient"
+	default:
+		if ua != "" {
+			parts := strings.Split(ua, "/")
+			if len(parts) > 0 && len(parts[0]) <= 20 {
+				return parts[0] + "Executor"
+			}
+		}
+		return "WorkBuddyExecutor"
+	}
 }

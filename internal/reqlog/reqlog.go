@@ -84,6 +84,10 @@ type Event struct {
 	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
 	ClientIP        string `json:"client_ip,omitempty"`
 	UserAgent       string `json:"user_agent,omitempty"`
+	Mode            string `json:"mode,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	ReasoningTokens int64  `json:"reasoning_tokens,omitempty"`
+	ExecutorType    string `json:"executor_type,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），
