@@ -27,7 +27,7 @@ func TestWafIPGateStateModel(t *testing.T) {
 	}
 	// 窗内第二个不同号 → 激活。
 	if g.noteWaf("u1") {
-		 // u1 已在窗内，本次仍只有 1 个不同号
+		// u1 已在窗内，本次仍只有 1 个不同号
 	}
 	if !g.noteWaf("u2") {
 		t.Fatal("窗内第二个不同号命中应激活")

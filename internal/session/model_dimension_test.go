@@ -10,8 +10,8 @@ import (
 // ResolveForModel 必须走慢路径重分配，而不是把会话钉在失败号上（issue #31/#35）。
 func TestResolveForModelReassignsWhenModelLimited(t *testing.T) {
 	r := New(Config{
-		TTL:   time.Minute,
-		Store: newCountingStore(),
+		TTL:       time.Minute,
+		Store:     newCountingStore(),
 		Available: func() []string { return []string{"a1", "a2"} },
 		AvailableForModel: func(model string) []string {
 			if model == "m-limited" {

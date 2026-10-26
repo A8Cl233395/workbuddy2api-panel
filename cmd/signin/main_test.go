@@ -18,9 +18,9 @@ func TestIsAlreadyNarrowMatching(t *testing.T) {
 		}
 	}
 	failures := []string{
-		"upstream error: code=400 msg=活动未开启",        // 400 但非幂等码
-		"upstream error: code=400 msg=request illegal",   // 风控/参数错误
-		"checkin activity not started",                    // 裸 checkin 字样不再误判
+		"upstream error: code=400 msg=活动未开启",           // 400 但非幂等码
+		"upstream error: code=400 msg=request illegal", // 风控/参数错误
+		"checkin activity not started",                 // 裸 checkin 字样不再误判
 		"http 500",
 	}
 	for _, m := range failures {
