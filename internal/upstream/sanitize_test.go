@@ -421,7 +421,7 @@ func TestPrepareBodyRewritesDeepSeekHarness(t *testing.T) {
 	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[` +
 		`{"role":"system","content":"You are an AI agent powered by DeepSeek Harness."},` +
 		`{"role":"user","content":"the DeepSeek Harness checkout is here"}]}`)
-	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", "", false)
+	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", nil, "", "", false)
 	if strings.Contains(string(out), "DeepSeek Harness") {
 		t.Fatalf("brand word survived: %s", out)
 	}
