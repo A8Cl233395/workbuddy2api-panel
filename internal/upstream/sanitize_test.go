@@ -392,16 +392,77 @@ func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 // 换一个词即绕过。钉住三条：命中改写、只含品牌词也走净化（特征预检不得漏）、
 // 改写结果不再含原始短语（可重复处理）。
 func TestDeepSeekHarnessBrandRewritten(t *testing.T) {
-	in := "You are an AI agent powered by DeepSeek Harness.\n\nCheck the exit code."
+	// 品牌串从表中取：真实字面量与文档里的写法差一个空格，手写会静默对不上。
+	brand := sanitizeIdentityFeatures[0]
+	in := "You are an AI agent powered by " + brand + ".\n\nCheck the exit code."
 	out := sanitizeTextIdentity(in)
-	if strings.Contains(out, "DeepSeek Harness") || !strings.Contains(out, "DeepSeekRuntime") {
-		t.Fatalf("brand word not rewritten: %q", out)
+	// 整句被中性句替换（身份句式规则）：只剩品牌改写时 `You are … powered by …` 的
+	// 句子骨架仍是特征，所以这里是整句级断言。
+	if strings.Contains(out, brand) || strings.Contains(out, "powered by") {
+		t.Fatalf("identity sentence not neutralized: %q", out)
 	}
-	if !strings.HasPrefix(out, "You are an AI agent powered by DeepSeekRuntime.") {
+	if !strings.HasPrefix(out, "You are a helpful AI assistant.") {
+		t.Errorf("sentence not replaced with neutral one: %q", out)
+	}
+	if !strings.Contains(out, "\n\nCheck the exit code.") {
 		t.Errorf("surrounding text changed: %q", out)
 	}
 	if again := sanitizeTextIdentity(out); again != out {
 		t.Errorf("not idempotent: %q -> %q", out, again)
+	}
+}
+
+// 身份句式的变体覆盖：动词表七种、名词可省、专名与冠词都认。
+// 上游补一条新搭配就能让只认单个动词的实现重新 400，所以逐个钉住。
+func TestIdentitySentenceVariants(t *testing.T) {
+	const neutral = "You are a helpful AI assistant."
+	for _, in := range []string{
+		"You are an AI agent powered by AcmeRuntime. Next.",
+		"You are a coding agent powered by the deepseek-v4.1-flash model. Next.",
+		"You are an AI assistant built on DeepSeek. Next.",
+		"You are Acme Agent, built by Acme Corp. Next.",
+		"You are the FooBot assistant, created by someone. Next.",
+		"You are a bot developed by someone. Next.",
+		"You are a tool made by someone. Next.",
+		"You are a model trained by someone. Next.",
+	} {
+		out := sanitizeTextIdentity(in)
+		if !strings.HasPrefix(out, neutral) {
+			t.Errorf("未中性化: %q -> %q", in, out)
+		}
+		if !strings.Contains(out, "Next.") {
+			t.Errorf("句后文本丢失: %q", out)
+		}
+	}
+}
+
+// 误伤保护：「You are free to use tools built by …」这类分词修饰宾语的句子不是身份句，
+// 靠正则窗口上界（形容词 0~3 个）挡住。预检也必须判 false，否则会白白 TrimSpace。
+func TestIdentitySentenceFalsePositives(t *testing.T) {
+	for _, in := range []string{
+		"You are free to use tools built by the vendor.",
+		"You are a helpful assistant that uses services developed by others. Ok.",
+		"You are welcome to deploy packages made by third parties.",
+		"You are right, that module was built by the other team. Fine.",
+	} {
+		if hasIdentityFingerprint(in) {
+			t.Errorf("预检误判: %q", in)
+		}
+		if out := sanitizeTextIdentity(in); out != in {
+			t.Errorf("误改写: %q -> %q", in, out)
+		}
+	}
+}
+
+// 作用域：身份句式属于身份类规则，sanitizeText（brand=false）不动，只有身份路径改。
+// 这与品牌词规则的既有作用域一致（sanitize_brand_scope 控制）。
+func TestIdentitySentenceScope(t *testing.T) {
+	in := "You are an AI agent powered by AcmeRuntime. Go."
+	if out := sanitizeText(in); out != in {
+		t.Errorf("brand=false 不该改写: %q", out)
+	}
+	if out := sanitizeTextIdentity(in); out == in {
+		t.Errorf("身份路径应该改写: %q", out)
 	}
 }
 
@@ -416,17 +477,37 @@ func TestDeepSeekHarnessDetected(t *testing.T) {
 	}
 }
 
-// 走完 prepareBody 全链路：system 与 user 里的品牌词都出站前改掉。
+// 走完 prepareBody 全链路：system 的身份句整句中性化，user 里的品牌词按作用域改写。
 func TestPrepareBodyRewritesDeepSeekHarness(t *testing.T) {
-	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[` +
-		`{"role":"system","content":"You are an AI agent powered by DeepSeek Harness."},` +
-		`{"role":"user","content":"the DeepSeek Harness checkout is here"}]}`)
-	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", nil, "", "", false)
-	if strings.Contains(string(out), "DeepSeek Harness") {
-		t.Fatalf("brand word survived: %s", out)
+	// 品牌串从表里取：真实字面量与文档写法差一个空格，手写会静默对不上而测试永远绿。
+	brand := sanitizeIdentityFeatures[0]
+	body, err := json.Marshal(map[string]any{
+		"model": "deepseek-v4.1-flash",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "You are an AI agent powered by " + brand + "."},
+			map[string]any{"role": "user", "content": "the " + brand + " checkout is here"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Count(string(out), "DeepSeekRuntime") != 2 {
-		t.Errorf("expected both messages rewritten: %s", out)
+	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", nil, "", "", false)
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	msgs := got["messages"].([]any)
+	sys, _ := msgs[0].(map[string]any)["content"].(string)
+	usr, _ := msgs[1].(map[string]any)["content"].(string)
+	if sys != "You are a helpful AI assistant." {
+		t.Errorf("system 身份句未中性化: %q", sys)
+	}
+	if strings.Contains(usr, brand) {
+		t.Errorf("user 品牌词未改写: %q", usr)
+	}
+	if !strings.Contains(usr, "checkout is here") {
+		t.Errorf("user 其余文本被破坏: %q", usr)
 	}
 }
 
@@ -528,7 +609,7 @@ func TestDshPathsParagraphRewritten(t *testing.T) {
 		t.Errorf("原文残留在出站文本里: %q", out)
 	}
 	// 语义必须保留：读提示词的 DSH 仍要知道 @ 路径怎么解析。
-	for _, want := range []string{"workspace root", "trailing slash", "read tool", "@\"...\""} {
+	for _, want := range []string{"project root", "trailing slash", "read tool", "@\"...\""} {
 		if !strings.Contains(out, want) {
 			t.Errorf("改写丢语义 %q: %q", want, out)
 		}
