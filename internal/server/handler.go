@@ -571,11 +571,19 @@ func (h *Handler) modelList() []map[string]any {
 		entry = applyModelInfoFields(entry, mi)
 		// effort 能力透出——远端 supportedEfforts 权威，缺失落到 CN 静态兜底表
 		// （客户端可发现档位，不再盲传）。无档位 → 省略字段。
-		if efforts, def := upstream.EffortListing("cn", mi.ID, mi.Efforts, mi.DefaultEffort); efforts != nil {
+		// 固定档模型（上游只报 default_effort、没有 supportedEfforts，如
+		// mimo-v2.6-pro）：把该默认档当唯一支持档声明出去，客户端看到「只有这一档」
+		// 而不是空列表——面板侧同一口径（单档下拉）。
+		efforts, def := upstream.EffortListing("cn", mi.ID, mi.Efforts, mi.DefaultEffort)
+		if efforts == nil && mi.SupportsReasoning && mi.DefaultEffort != "" {
+			efforts, def = []string{mi.DefaultEffort}, mi.DefaultEffort
+		}
+		if efforts != nil {
 			entry["reasoning_supported_efforts"] = efforts
 			if def != "" {
 				entry["reasoning_default_effort"] = def
 			}
+			h.declareReasoning(entry, "cn", mi.ID, efforts)
 		}
 		out = append(out, entry)
 	}
@@ -609,7 +617,10 @@ func (h *Handler) modelList() []map[string]any {
 			}
 			// context_length / max_output_tokens 四级查找（与 CN 动态分支同口径）。
 			var remoteCtx, remoteOut int64
+			var info upstream.ModelInfo
+			hasInfo := false
 			if mi, ok := globalInfos[id]; ok {
+				info, hasInfo = mi, true
 				entry = applyModelInfoFields(entry, mi)
 				remoteCtx, remoteOut = mi.ContextWindow, mi.MaxTokens
 			}
@@ -617,11 +628,18 @@ func (h *Handler) modelList() []map[string]any {
 			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.HTTP); ok {
 				entry["max_output_tokens"] = mo
 			}
-			if efforts, def := upstream.EffortListing("global", id, globalEfforts[id], globalDefaults[id]); efforts != nil {
+			// 固定档模型与 CN 分支同口径：只报默认档、没有档位表时，把该默认档
+			// 当唯一支持档声明（否则 global 列表上这类模型看起来「没有思考能力」）。
+			efforts, def := upstream.EffortListing("global", id, globalEfforts[id], globalDefaults[id])
+			if efforts == nil && hasInfo && info.SupportsReasoning && info.DefaultEffort != "" {
+				efforts, def = []string{info.DefaultEffort}, info.DefaultEffort
+			}
+			if efforts != nil {
 				entry["reasoning_supported_efforts"] = efforts
 				if def != "" {
 					entry["reasoning_default_effort"] = def
 				}
+				h.declareReasoning(entry, "global", id, efforts)
 			}
 			out = append(out, entry)
 		}
