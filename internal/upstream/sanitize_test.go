@@ -595,7 +595,7 @@ func TestPrepareBodyRewritesDshPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", "", false)
+	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", nil, "", "", false)
 	if strings.Contains(string(out), "Tokens prefixed with @") {
 		t.Fatalf("出站 body 仍带指纹: %s", out)
 	}
