@@ -20,6 +20,7 @@ var sanitizeFeatures = []string{
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
+	"Tokens prefixed with @",                          // DSH 0.3.x 的 @ 路径说明段（唯一不含品牌词的 DSH 指纹）
 }
 
 // sanitizeIdentityFeatures 身份类特征：品牌词（DSH 身份句）。默认对所有消息角色生效
@@ -44,6 +45,40 @@ var sanitizeBareHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-header`)
 
 // sanitizeKvRe 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
 var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
+
+// sanitizeDshPathsRe DSH 0.3.x 系统提示里的「@ 开头的路径怎么解析」整段说明。
+//
+// 这一段是本仓唯一漏掉的 DSH 指纹：段内**不含任何品牌词**，所以 sanitizeIdentityRewrites
+// （DeepSeekRuntime → …）的预检根本不会命中，原文原样发出即 400 11-128
+// Illegal API invocation from an unapproved channel。
+//
+// 上游按「连续原文」匹配（逐段二分实测：只发首句放行，前两句连排即拦），所以必须整段
+// 一起改。这里做同义改写而不是删除：@ 路径、相对路径基准、结尾斜杠表示目录、其余按文件读、
+// @"..." 用于含空格的路径——语义全部保留，只换措辞让连续特征失配。
+//
+// 两种线上见过的结尾措辞都要覆盖（(?s) 让 .*? 跨行，段内本来就有换行）：
+//
+//	... quotes a path containing spaces.            （0.3.x 当前写法）
+//	... form only quotes a path that contains spaces. （更早的写法）
+//
+// 段外的 @ 不受影响：邮箱、包名、含 @ 的绝对路径都不匹配。
+//
+// 两条已知边界：预检是大小写敏感的（与 sanitizeFeatures 其它项一致；DSH 原文大小写固定）；
+// 规则属于全局改写层，任何角色里出现这一段都会被改——上游按连续原文匹配、不分角色，
+// 保留原样必然 400。
+var sanitizeDshPathsRe = regexp.MustCompile(
+	`(?is)Tokens prefixed with @ are paths the user explicitly referenced\..*?path (?:containing|that contains) spaces\.`)
+
+const sanitizeDshPathsProbe = "Tokens prefixed with @"
+
+// sanitizeDshPathsReplacement 逐句同义改写。与主流实现（workbuddy2api-hub #677/#678）逐字
+// 一致：那段替换串已被真实 CN 账号回放验证过（修复前 400 / 修复后 200）。
+const sanitizeDshPathsReplacement = "Paths beginning with @ refer to files the user explicitly mentioned. " +
+	"Relative paths are resolved against the workspace root; absolute paths point " +
+	"to files or directories on the host. A trailing slash marks a directory, so " +
+	"list it when its contents matter. Anything else is a file: open it with the " +
+	"read tool when its contents are needed, and never claim to have inspected it " +
+	"before reading. The @\"...\" form only quotes a path that contains spaces."
 
 // sanitizeRewrites 改写层：全模板句逐字替换（每句只改一个词，语义不变）。
 //
@@ -120,6 +155,10 @@ func sanitizeTextWith(text string, brand bool) string {
 		for _, rw := range sanitizeIdentityRewrites {
 			text = strings.ReplaceAll(text, rw[0], rw[1])
 		}
+	}
+	// @ 路径说明段：预检已是字面量，这里再挡一次，避免无关文本白跑一遍跨行正则。
+	if strings.Contains(text, sanitizeDshPathsProbe) {
+		text = sanitizeDshPathsRe.ReplaceAllString(text, sanitizeDshPathsReplacement)
 	}
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")

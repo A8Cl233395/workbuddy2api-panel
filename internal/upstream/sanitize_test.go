@@ -496,3 +496,110 @@ func TestBrandScopeDefaultGlobal(t *testing.T) {
 		t.Error("空值应回落 all")
 	}
 }
+
+// DSH 0.3.x 的 @ 路径说明段是**唯一不含品牌词**的 DSH 指纹：品牌改写规则碰不到它，
+// 原文发出即 400 11-128 unapproved channel。钉住四条：整段被改写、两种线上措辞都覆盖、
+// 段外 @ 不动、改写可重复。
+const (
+	dshPathsNow = "Tokens prefixed with @ are paths the user explicitly referenced. " +
+		"Relative paths resolve from the workspace root; absolute paths point to " +
+		"files or directories on the host. A trailing slash marks a directory, so " +
+		"list it when its contents matter. Anything else is a file: open it with " +
+		"the read tool when its contents are needed, and never claim to have " +
+		"inspected it before reading. The @\"...\" form only quotes a path that " +
+		"contains spaces."
+	dshPathsOld = "Tokens prefixed with @ are paths the user explicitly referenced. " +
+		"Relative paths resolve from the workspace root; absolute paths identify " +
+		"files or directories on the host. A trailing slash marks a directory: " +
+		"list it when its contents matter. Anything else is a file: use the read " +
+		"tool when its contents are needed, and do not claim to have inspected it " +
+		"before reading. @\"...\" quotes a path containing spaces."
+)
+
+func TestDshPathsParagraphRewritten(t *testing.T) {
+	if !hasFingerprint(dshPathsNow) {
+		t.Fatal("段落未被特征预检命中：净化整条链都不会启动")
+	}
+	out := sanitizeText(dshPathsNow)
+	if out != sanitizeDshPathsReplacement {
+		t.Fatalf("整段未被替换:\n got=%q\nwant=%q", out, sanitizeDshPathsReplacement)
+	}
+	if strings.Contains(out, "Tokens prefixed with @") {
+		t.Errorf("原文残留在出站文本里: %q", out)
+	}
+	// 语义必须保留：读提示词的 DSH 仍要知道 @ 路径怎么解析。
+	for _, want := range []string{"workspace root", "trailing slash", "read tool", "@\"...\""} {
+		if !strings.Contains(out, want) {
+			t.Errorf("改写丢语义 %q: %q", want, out)
+		}
+	}
+}
+
+// 更早的 DSH 写法（identify / use the read tool / quotes a path containing spaces）
+// 同一段语义、不同措辞：正则的结尾分支必须也吃下它。
+func TestDshPathsOlderWordingRewritten(t *testing.T) {
+	if out := sanitizeText(dshPathsOld); out != sanitizeDshPathsReplacement {
+		t.Fatalf("旧措辞未覆盖:\n got=%q\nwant=%q", out, sanitizeDshPathsReplacement)
+	}
+}
+
+// 段内本来就有换行，(?s) 没开的话 .*? 跨不过去，只改半段等于没改。
+func TestDshPathsMultilineRewritten(t *testing.T) {
+	in := strings.Replace(dshPathsNow, "Relative paths", "\n\nRelative paths", 1)
+	out := sanitizeText(in)
+	if strings.Contains(out, "Tokens prefixed with @") || !strings.Contains(out, "Paths beginning with @") {
+		t.Fatalf("跨行形态未覆盖: %q", out)
+	}
+}
+
+// 段落嵌在更长的 system 里时只换这一段，前后文原样。
+func TestDshPathsEmbeddedKeepsSurroundings(t *testing.T) {
+	in := "before\n\n" + dshPathsNow + "\n\nafter"
+	if out := sanitizeText(in); out != "before\n\n"+sanitizeDshPathsReplacement+"\n\nafter" {
+		t.Fatalf("前后文被动了: %q", out)
+	}
+}
+
+func TestDshPathsIdempotent(t *testing.T) {
+	once := sanitizeText(dshPathsNow)
+	if again := sanitizeText(once); again != once {
+		t.Fatalf("不幂等: %q -> %q", once, again)
+	}
+}
+
+// 段外的 @ 是普通文本（邮箱、npm 包名、Windows 路径），不得改写也不得触发净化。
+func TestDshPathsUnrelatedAtTextUntouched(t *testing.T) {
+	for _, in := range []string{
+		"Mail me at someone@example.com and open C:\\cache\\@tmp.",
+		"npm i @deepseek-ai/dsh-llm",
+		"Relative paths resolve from the workspace root, but this is not the paragraph.",
+	} {
+		if hasFingerprint(in) {
+			t.Errorf("误触发预检: %q", in)
+		}
+		if out := sanitizeText(in); out != in {
+			t.Errorf("误改写: %q -> %q", in, out)
+		}
+	}
+}
+
+// 走完 prepareBody 全链路：system 里的这段必须真正在出站 body 里被换掉。
+func TestPrepareBodyRewritesDshPaths(t *testing.T) {
+	body, err := json.Marshal(map[string]any{
+		"model": "deepseek-v4.1-flash",
+		"messages": []any{
+			map[string]any{"role": "system", "content": dshPathsNow},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", "", false)
+	if strings.Contains(string(out), "Tokens prefixed with @") {
+		t.Fatalf("出站 body 仍带指纹: %s", out)
+	}
+	if !strings.Contains(string(out), "Paths beginning with @") {
+		t.Fatalf("出站 body 未被改写: %s", out)
+	}
+}
