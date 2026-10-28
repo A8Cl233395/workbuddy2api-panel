@@ -118,12 +118,12 @@ func TestRestartRequiredIncludesAllAssemblyFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := ParseConfig([]byte(`{"global":{"enabled":false},"prompt":{"mode":"custom"},"upstream":{"user_agent":"new-agent"},"session_sticky":{"enabled":false},"server":{"read_timeout":"120s"},"upstash":{"url":"https://example.upstash.io","token":"sample"}}`))
+	next, err := ParseConfig([]byte(`{"global":{"enabled":false},"prompt":{"mode":"custom","degrade_enabled":false},"upstream":{"user_agent":"new-agent"},"session_sticky":{"enabled":false},"server":{"read_timeout":"120s"},"upstash":{"url":"https://example.upstash.io","token":"sample"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	fields := restartRequiredFields(current, next)
-	for _, want := range []string{"global.enabled", "prompt.mode", "upstream.user_agent", "session_sticky.enabled", "server.read_timeout", "upstash.url", "upstash.token"} {
+	for _, want := range []string{"global.enabled", "prompt.mode", "prompt.degrade_enabled", "upstream.user_agent", "session_sticky.enabled", "server.read_timeout", "upstash.url", "upstash.token"} {
 		found := false
 		for _, field := range fields {
 			found = found || field == want
@@ -131,6 +131,51 @@ func TestRestartRequiredIncludesAllAssemblyFields(t *testing.T) {
 		if !found {
 			t.Fatalf("missing %s in %v", want, fields)
 		}
+	}
+}
+
+// TestSaveConfigPromptDegradeEnabledDeepMerge 面板只提交 prompt.degrade_enabled 时，
+// 深合并必须保留同块其他键（mode/file/degraded_file）与用户手写未知键。
+func TestSaveConfigPromptDegradeEnabledDeepMerge(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	initial := `{"api_key":"k","prompt":{"mode":"passthrough","file":"","degraded_file":"","keep_me":"x"}}`
+	if err := os.WriteFile(path, []byte(initial), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := livecfg.New(livecfg.Snapshot{APIKey: cfg.APIKey})
+	p := pool.New("")
+	defer p.Close()
+	up := upstream.New()
+	sch := scheduler.New(scheduler.Config{Pool: p, Upstream: up})
+	fields, err := saveConfig([]byte(`{"prompt":{"degrade_enabled":false}}`), path, live, p, up, sch, nil, nil, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range fields {
+		found = found || f == "prompt.degrade_enabled"
+	}
+	if !found {
+		t.Fatalf("missing prompt.degrade_enabled in restart fields: %v", fields)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(saved, &doc); err != nil {
+		t.Fatal(err)
+	}
+	promptBlock, _ := doc["prompt"].(map[string]any)
+	if promptBlock["degrade_enabled"] != false {
+		t.Errorf("degrade_enabled=%v want false", promptBlock["degrade_enabled"])
+	}
+	if promptBlock["mode"] != "passthrough" || promptBlock["keep_me"] != "x" {
+		t.Errorf("deep merge dropped sibling keys: %v", promptBlock)
 	}
 }
 
@@ -166,6 +211,7 @@ func TestEnvironmentManagedFieldsMatchesValidOverrides(t *testing.T) {
 	t.Setenv("WB2A_API_KEY", "env-key")
 	t.Setenv("WB2A_SOFT_RATE", "30s")
 	t.Setenv("WB2A_TIMEOUT_SECONDS", "invalid")
+	t.Setenv("WB2A_PROMPT_DEGRADE_ENABLED", "false")
 	fields := Default().EnvironmentManagedFields()
 	has := func(want string) bool {
 		for _, field := range fields {
@@ -175,7 +221,7 @@ func TestEnvironmentManagedFieldsMatchesValidOverrides(t *testing.T) {
 		}
 		return false
 	}
-	if !has("api_key") || !has("cooldown.soft_rate") || has("upstream.timeout_seconds") {
+	if !has("api_key") || !has("cooldown.soft_rate") || !has("prompt.degrade_enabled") || has("upstream.timeout_seconds") {
 		t.Fatalf("managed=%v", fields)
 	}
 }

@@ -1412,7 +1412,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">提示词文件路径</span>
                 <input name="prompt_file" placeholder="留空 = 内置默认提示词">
                 <span class="hint">需重启</span></label>
+              <label class="fld"><span class="lb">降级提示词文件路径</span>
+                <input name="prompt_degraded_file" placeholder="留空 = 内置中性提示词">
+                <span class="hint">内容拦截误报时使用；路径不可读会拒绝启动；需重启</span></label>
             </div>
+            <div class="switch"><span class="lb">内容拦截降级重试</span>
+              <input type="checkbox" name="prompt_degrade_enabled"></div>
+            <div class="hint">默认开启。passthrough / append 被上游内容策略误拦时，自动换中性提示词重试并进入降级窗口到次日 00:00（CST）。
+              关闭后被拦截请求不再重试，客户端直接收到上游原始错误；即使进程内已有降级窗口也继续透传原始 system。custom 模式不受影响。需重启。</div>
             <div class="hr"></div>
             <div class="switch"><span class="lb">出站请求指纹脱敏</span>
               <input type="checkbox" name="sanitize_blacklist_fingerprints"></div>

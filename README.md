@@ -71,7 +71,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点）+ **成长任务队列**（11 点，自动跑一遍任务中心待办），各类独立开关 |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动对齐到模型支持的**最近档**（同距优先模型默认档，行里显示生效档位）；网关侧 `thinking.*` 档位策略（客户端优先 / 网关优先 + 作用域「只档位 / 档位与开关」，含按模型覆盖、`off` 尊重与保存后热生效） |
-| 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
+| 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `passthrough`，透传客户端原文；可选 `custom` / `append`），从源头消灭 system 来源的内容误报；`passthrough` / `append` 遇拦截可按 `prompt.degrade_enabled` 自动降级重试 |
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
@@ -165,3 +165,47 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **嵌入端点（实验）** | `POST /v1/embeddings`：OpenAI 兼容嵌入，默认关闭（`features.embeddings_enabled`）。上游 `POST /v2/embeddings` 与对话是两套注册表，实测只有 `bge-m3`（1024 维）；`11351` 映射成 404 `model_not_found`，回程补 `object`/`index`，条数不符 502。关闭时回 403 `embeddings_disabled` |
 | **补签卡每轮上限** | `schedule.makeup_cards_per_round`（默认 `0` = 不限，保持既有行为）。补签会改账号历史，保守部署设 `1` 即每轮只补一张，剩余漏签下一轮继续；面板保存后热生效 |
 
+
+## 🧩 系统提示词与降级重试
+
+`prompt.*` 在启动时装配（与 `prompt.mode` 同组，面板保存后会提示需重启进程）：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `prompt.mode` | `passthrough` | `passthrough` 透传客户端原始 system；`custom` 用网关自有提示词替换；`append` 保留客户端 system 并在开头连续 system 块后追加网关提示词 |
+| `prompt.file` | 空 | `custom` / `append` 使用的提示词文件；空 = 内置 `defaultprompt.md`。路径非空但不可读时启动报错（fail fast） |
+| `prompt.degrade_enabled` | `true` | 内容拦截误报的降级重试总开关。`true` 保持历史行为；`false` 时被拦截请求不再重试、不触发降级窗口，并把上游原始错误透传给调用方 |
+| `prompt.degraded_file` | 空 | 降级时使用的中性提示词文件；空 = 内置中性提示词。路径非空但不可读时启动报错（fail fast） |
+
+环境变量覆盖（启动时生效，`WB2A_*`）：
+
+| 环境变量 | 对应字段 |
+|---|---|
+| `WB2A_PROMPT_MODE` | `prompt.mode` |
+| `WB2A_PROMPT_FILE` | `prompt.file` |
+| `WB2A_PROMPT_DEGRADE_ENABLED` | `prompt.degrade_enabled`（bool，`false` 关闭） |
+| `WB2A_PROMPT_DEGRADED_FILE` | `prompt.degraded_file` |
+
+### 内容拦截误报与降级重试
+
+`passthrough` / `append` 模式下，上游返回 HTTP 400 且文案包含
+`blocked by security policy` / `unapproved channel` / `illegal api invocation`
+时，网关判定为 system 指纹误报，默认（`prompt.degrade_enabled=true`）做两件事：
+
+1. 同请求内按「拆句留在 system → 原文搬进首条 user → 换中性提示词」逐层抢救并重试一次；
+2. 触发降级窗口，持续到次日 00:00 CST（Asia/Shanghai）。窗口期内 `passthrough` /
+   `append` 请求不再透传客户端原始 system，直接用中性提示词出站。
+
+这是历史默认行为，**存量部署不受影响**。但降级窗口内客户端 system 里的工具调用契约、
+项目规范、人设会静默失效（模型突然不听指令、工具一次不跑），而请求仍可能返回 200，
+调用方无感知。需要这种确定性时把 `prompt.degrade_enabled` 设为 `false`：
+
+- 被拦截请求**不再重试**，客户端收到上游原始错误（HTTP 400 + 上游 body）；
+- **不触发**降级窗口；即使进程内存中已有窗口处于激活状态，也继续按 `passthrough` /
+  `append` 的既有语义出站（开关优先于窗口状态）；
+- `ErrContentBlocked` 的错误分类不变：不冷却、不熔断、不计错、不罚账号；
+- `custom` 模式本来就不进降级路径，不受该开关影响。
+
+降级真正生效的请求会带响应头 `X-WB2A-Degraded: 1`，运行日志同时打印一行
+`prompt degrade: ...` 标记。面板「上游与高级 → 系统提示词模式」下方提供同一开关的复选框，
+保存后需重启进程生效。

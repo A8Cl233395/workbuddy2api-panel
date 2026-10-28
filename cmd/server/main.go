@@ -505,6 +505,10 @@ func main() {
 		Usage:        rec,
 		RequestLog:   requestLog,
 		PromptMode:   cfg.Prompt.Mode,
+		// 降级重试总开关（prompt.degrade_enabled，缺省 true）：用禁用位接线，
+		// Handler 零值保持既有降级行为。
+		DisablePromptDegrade: !cfg.Prompt.DegradeEnabled,
+		PromptDegradedText:   cfg.DegradedText,
 		// 模型降级路由表：读 live 快照（支持面板热更，改完即生效、无需重启）。
 		ModelFallback: func() map[string]string { return live.Load().ModelFallback },
 		PromptText:    cfg.PromptText,
@@ -948,6 +952,10 @@ func restartRequiredFields(current, next *Config) []string {
 	changed("prompt.mode", current.Prompt.Mode, next.Prompt.Mode)
 	changed("prompt.file", current.Prompt.File, next.Prompt.File)
 	changed("prompt.text", current.PromptText, next.PromptText)
+	// 降级开关与自定义降级提示词都在装配期写进 Handler（请求路径并发读取，不做热改）。
+	changed("prompt.degrade_enabled", current.Prompt.DegradeEnabled, next.Prompt.DegradeEnabled)
+	changed("prompt.degraded_file", current.Prompt.DegradedFile, next.Prompt.DegradedFile)
+	changed("prompt.degraded_text", current.DegradedText, next.DegradedText)
 	changed("upstash.url", current.Upstash.URL, next.Upstash.URL)
 	changed("upstash.token", current.Upstash.Token, next.Upstash.Token)
 	changed("session_sticky.enabled", current.SessionSticky.Enabled, next.SessionSticky.Enabled)

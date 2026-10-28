@@ -315,10 +315,26 @@ type Config struct {
 		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
 		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
 		File string `json:"file"`
+		// DegradeEnabled 内容拦截误报的降级重试总开关，缺省 true（与历史行为一致）。
+		//
+		// true：passthrough / append 被上游内容策略拦截时，按「拆句 → 搬家 → 中性
+		// 提示词」逐层抢救，并触发降级窗口到次日 00:00 CST。
+		// false：不重试、不触发窗口；被拦截请求如实透传上游错误，且即使进程内已有
+		// 激活的降级窗口，也继续按模式原样出站（开关优先于窗口状态）。
+		// custom 模式本就不进降级路径，不受本开关影响。
+		//
+		// 缺省 true 靠 Default() 显式赋值实现：JSON 键缺席时字段保留 true，
+		// 只有显式 false 才关闭，存量部署零影响。
+		DegradeEnabled bool `json:"degrade_enabled"`
+		// DegradedFile 自定义降级中性提示词文件路径；空 = 内置 prompt.Degraded。
+		// 语义对齐 prompt.file：路径非空但不可读 → 启动报错（fail fast）。
+		DegradedFile string `json:"degraded_file"`
 	} `json:"prompt"`
 
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
 	PromptText string `json:"-"`
+	// DegradedText 解析后的降级中性提示词（prompt.degraded_file；空 = 内置 prompt.Degraded）。
+	DegradedText string `json:"-"`
 
 	Upstash struct {
 		URL   string `json:"url"`   // 空 = 纯内存模式；支持完整 rediss:// URL 或 https://xxx.upstash.io host
@@ -509,6 +525,8 @@ func Default() *Config {
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Features.SanitizeBrandScope = "all"
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
+	// 降级重试缺省开启：保持历史行为，存量配置（无 prompt.degrade_enabled 键）零影响。
+	c.Prompt.DegradeEnabled = true
 	// 思考档位策略缺省：网关按模型最高档补缺档请求，但客户端显式档位优先
 	// （client_priority=true），且不覆盖客户端的关闭思考意图（override_scope=level）。
 	c.Thinking.Enabled = true
@@ -703,6 +721,14 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PROMPT_FILE"); v != "" {
 		c.Prompt.File = v
 	}
+	if v := os.Getenv("WB2A_PROMPT_DEGRADE_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Prompt.DegradeEnabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_PROMPT_DEGRADED_FILE"); v != "" {
+		c.Prompt.DegradedFile = v
+	}
 	// 思考档位策略（thinking 节）。bool 解析失败视为不生效（与其它 env 同口径）。
 	if v := os.Getenv("WB2A_THINKING_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -810,6 +836,8 @@ func (c *Config) EnvironmentManagedFields() []string {
 		{"WB2A_SANITIZE_FINGERPRINTS", "features.sanitize_blacklist_fingerprints", "bool"},
 		{"WB2A_SANITIZE_BRAND_SCOPE", "features.sanitize_brand_scope", ""},
 		{"WB2A_PROMPT_MODE", "prompt.mode", ""}, {"WB2A_PROMPT_FILE", "prompt.file", ""},
+		{"WB2A_PROMPT_DEGRADE_ENABLED", "prompt.degrade_enabled", "bool"},
+		{"WB2A_PROMPT_DEGRADED_FILE", "prompt.degraded_file", ""},
 		{"WB2A_THINKING_ENABLED", "thinking.enabled", "bool"},
 		{"WB2A_THINKING_DEFAULT_EFFORT", "thinking.default_effort", ""},
 		{"WB2A_THINKING_CLIENT_PRIORITY", "thinking.client_priority", "bool"},
@@ -1143,7 +1171,35 @@ func (c *Config) normalize() error {
 // mode 非法（非 passthrough/custom/append）启动报错，避免静默回落到某一分支；
 // custom/append 模式下 file 非空但不可读 → 报错（fail fast），file 空 → 用内置默认
 // （两模式共用同一加载路径，PromptText 均非空）。
-// passthrough 模式不加载文本（透传客户端原始 system，文本在降级时用 prompt.Degraded）。
+// passthrough 模式不加载 PromptText（透传客户端原始 system）。
+// DegradedText 与模式无关：degraded_file 非空但不可读同样 fail fast；空 = 内置
+// prompt.Degraded（降级时用）。
+func (c *Config) normalizePrompt() error {
+	switch m := strings.ToLower(strings.TrimSpace(c.Prompt.Mode)); m {
+	case "", "passthrough":
+		c.Prompt.Mode = "passthrough"
+	case "custom":
+		c.Prompt.Mode = "custom"
+	case "append":
+		c.Prompt.Mode = "append"
+	default:
+		return fmt.Errorf("prompt.mode: %q 不是合法值（passthrough / custom / append）", c.Prompt.Mode)
+	}
+	if c.Prompt.Mode == "custom" || c.Prompt.Mode == "append" {
+		text, err := prompt.Load(c.Prompt.Mode, c.Prompt.File)
+		if err != nil {
+			return err
+		}
+		c.PromptText = text
+	}
+	degraded, err := prompt.LoadDegraded(c.Prompt.DegradedFile)
+	if err != nil {
+		return err
+	}
+	c.DegradedText = degraded
+	return nil
+}
+
 // normalizeThinking 校验并规范化 thinking 节（思考档位策略）。
 //
 // 空串回落默认；非法档位 / 作用域 fail fast——静默丢弃会让「面板填了 high」
@@ -1182,27 +1238,6 @@ func (c *Config) normalizeThinking() error {
 		out[key] = val
 	}
 	c.Thinking.ModelDefaults = out
-	return nil
-}
-
-func (c *Config) normalizePrompt() error {
-	switch m := strings.ToLower(strings.TrimSpace(c.Prompt.Mode)); m {
-	case "", "passthrough":
-		c.Prompt.Mode = "passthrough"
-	case "custom":
-		c.Prompt.Mode = "custom"
-	case "append":
-		c.Prompt.Mode = "append"
-	default:
-		return fmt.Errorf("prompt.mode: %q 不是合法值（passthrough / custom / append）", c.Prompt.Mode)
-	}
-	if c.Prompt.Mode == "custom" || c.Prompt.Mode == "append" {
-		text, err := prompt.Load(c.Prompt.Mode, c.Prompt.File)
-		if err != nil {
-			return err
-		}
-		c.PromptText = text
-	}
 	return nil
 }
 

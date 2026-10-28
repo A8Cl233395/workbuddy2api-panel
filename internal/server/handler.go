@@ -61,6 +61,13 @@ type Config struct {
 	PromptMode string
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
+	// DisablePromptDegrade 关闭内容拦截误报的降级重试（config prompt.degrade_enabled=false）。
+	// 用「禁用位」而不是「启用位」：Handler 裸用/单测零值时保持既有降级行为，
+	// 避免漏配一个字段就静默改变线上语义。
+	DisablePromptDegrade bool
+	// PromptDegradedText 自定义降级中性提示词（config prompt.degraded_file）；
+	// 空 = 内置 prompt.Degraded。
+	PromptDegradedText string
 
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
@@ -150,6 +157,21 @@ func (h *Handler) softCooldown() time.Duration {
 		return h.cfg.SoftCooldown
 	}
 	return 600 * time.Second
+}
+
+// degradeEnabled 内容拦截误报的降级重试是否启用（prompt.degrade_enabled，缺省 true）。
+//
+// 开关是总闸：false 时既不重试、不触发降级窗口，也忽略进程内已激活的窗口
+// （窗口可能来自开启期间的触发，随后用户关闭开关但未重启进程）。
+func (h *Handler) degradeEnabled() bool { return !h.cfg.DisablePromptDegrade }
+
+// degradedPrompt 返回当前使用的降级中性提示词文本（空 = 内置 prompt.Degraded）。
+// 只做空值兜底，不改写用户文件内容（前后空白可能是刻意排版）。
+func (h *Handler) degradedPrompt() string {
+	if strings.TrimSpace(h.cfg.PromptDegradedText) != "" {
+		return h.cfg.PromptDegradedText
+	}
+	return prompt.Degraded
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -1074,25 +1096,33 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//   - passthrough / append 非降级期：透传客户端原始 system（append 则再插一条网关 system）。
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
+	//
+	// 开关优先级：prompt.degrade_enabled=false 时 degradeActive 恒 false——窗口
+	// 即使已在内存里激活也不改写 body（开关优先于窗口状态），append 照常追加。
 	degradedApplied := false
 	// splitApplied / movedApplied 11-128 的两层「不改文本」抢救各用一次（拆句留在 system、
 	// 搬家进 user），与 degradedApplied（中性提示词替换）按顺序各用一次，避免同请求反复重试。
 	splitApplied := false
 	movedApplied := false
+	degradeEnabled := h.degradeEnabled()
+	degradeActive := degradeEnabled && h.degrade.Active()
 	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
 		body = prompt.Rewrite(body, h.cfg.PromptText)
-	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
+	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !degradeActive {
 		body = prompt.Append(body, h.cfg.PromptText)
-	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active() {
+	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && degradeActive {
 		// 降级期：与下面重试阶梯同一优先级——拆句留在 system 最好，其次搬家，都不行才整体替换。
+		// 可观测：只要能进这条分支就算降级生效（响应头 + 一行运行日志）。
+		w.Header().Set("X-WB2A-Degraded", "1")
+		log.Printf("prompt degrade: window active, applying degraded rescue (mode=%s)", h.cfg.PromptMode)
 		if split, ok := prompt.SplitSystemMessages(body); ok {
 			body = split
 			splitApplied = true
-		} else if moved, ok := prompt.MoveSystemToUser(body, prompt.Degraded); ok {
+		} else if moved, ok := prompt.MoveSystemToUser(body, h.degradedPrompt()); ok {
 			body = moved
 			movedApplied = true
 		} else {
-			body = prompt.Rewrite(body, prompt.Degraded)
+			body = prompt.Rewrite(body, h.degradedPrompt())
 			degradedApplied = true
 		}
 	}
@@ -1329,42 +1359,47 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			// 内容拦截误报（passthrough/append 模式）：三层抢救，从「改动最小」到「改动最大」。
-			// 每一层都只在本来就会失败的请求上多花一次上游调用，正常流量零影响。
+			// 内容拦截误报（passthrough/append 模式，且 prompt.degrade_enabled=true）：
+			// 三层抢救，从「改动最小」到「改动最大」。每一层都只在本来就会失败的请求上
+			// 多花一次上游调用，正常流量零影响。开关关闭时整段跳过——被拦截请求如实
+			// 透传上游错误，不重试、不触发降级窗口（见下方 ErrContentBlocked 终态分支）。
 			//   ① SplitSystemMessages：按句界把 system 拆成多条，**仍在 system 里**，
 			//      文本一字不改（实测原段 400 / 拆开后 200，见 prompt 包注释）；
 			//   ② MoveSystemToUser：拆不动（单句 system）时把原文搬进首条 user；
 			//   ③ Rewrite(Degraded)：中性提示词整体替换，保证不再命中。
 			// 都被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
 			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
-			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !splitApplied {
+			if kind == upstream.ErrContentBlocked && degradeEnabled && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !splitApplied {
 				if split, ok := prompt.SplitSystemMessages(body); ok {
 					body = split
 					splitApplied = true
 					// 置降级态：这条客户端的 system 每次都会被拦，逐请求重试等于双倍上游调用。
 					// 之后的新请求直接按拆分形态出站，文本不丢也不再撞墙。
 					h.degrade.Trigger()
+					w.Header().Set("X-WB2A-Degraded", "1")
 					delete(tried, acct.UID)
 					releaseHeld()
 					log.Printf("content-blocked (system fingerprint) -> split system into sentences, retry")
 					continue
 				}
 			}
-			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !movedApplied {
-				if moved, ok := prompt.MoveSystemToUser(body, prompt.Degraded); ok {
+			if kind == upstream.ErrContentBlocked && degradeEnabled && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !movedApplied {
+				if moved, ok := prompt.MoveSystemToUser(body, h.degradedPrompt()); ok {
 					body = moved
 					movedApplied = true
 					h.degrade.Trigger()
+					w.Header().Set("X-WB2A-Degraded", "1")
 					delete(tried, acct.UID) // 单账号池也能拿到重试机会（重试占一次名额）
 					releaseHeld()
 					log.Printf("content-blocked (system fingerprint) -> moved system text into first user message, retry")
 					continue
 				}
 			}
-			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
+			if kind == upstream.ErrContentBlocked && degradeEnabled && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
 				h.degrade.Trigger()
-				body = prompt.Rewrite(body, prompt.Degraded)
+				body = prompt.Rewrite(body, h.degradedPrompt())
 				degradedApplied = true
+				w.Header().Set("X-WB2A-Degraded", "1")
 				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
 				releaseHeld()
 				log.Printf("content-blocked (likely fingerprint false positive) -> degraded prompt retry")

@@ -36,6 +36,22 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if c.Pool.ModelFallback == nil {
 		t.Error("pool.model_fallback 示例应存在（空对象即可），否则用户不知道有这张表")
 	}
+	// prompt.degrade_enabled 是默认开启的开关，示例必须显式可见；键缺失时
+	// Config 零值 false 无法区分「示例漏写」与「示例写了 false」，故按原始 JSON 检查。
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("%s 无法解析为通用 JSON: %v", path, err)
+	}
+	promptBlock, _ := doc["prompt"].(map[string]any)
+	if promptBlock == nil {
+		t.Fatal("config.example.json 缺少 prompt 段")
+	}
+	if v, ok := promptBlock["degrade_enabled"]; !ok || v != true {
+		t.Errorf("prompt.degrade_enabled 示例值应为 true，得到 %v (存在=%v)", v, ok)
+	}
+	if _, ok := promptBlock["degraded_file"]; !ok {
+		t.Error("prompt.degraded_file 示例应存在（空串即可）")
+	}
 	// models.allowed（issue #68）：示例必须是存在的数组（仿上方各项的「示例可见」
 	// 口径）。空数组解析为非 nil 空切片；nil = 键缺失，用户无从发现白名单配置。
 	if c.Models.Allowed == nil {

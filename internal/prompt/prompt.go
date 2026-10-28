@@ -42,6 +42,22 @@ func Load(mode, file string) (string, error) {
 	return string(raw), nil
 }
 
+// LoadDegraded 按 file 加载降级中性提示词文本。
+//   - file 空 → 返回内置 Degraded；
+//   - file 非空 → 读文件（不存在/读失败返回 error，调用方 fail fast，不静默回落）。
+//
+// 与 Load 的差别只在默认值：Load 的内置默认是完整网关提示词，这里是最小中性句。
+func LoadDegraded(file string) (string, error) {
+	if file == "" {
+		return Degraded, nil
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("degraded prompt file %s: %w", file, err)
+	}
+	return string(raw), nil
+}
+
 // Rewrite 解析 OpenAI 请求体并替换系统提示词：
 //   - 删除 messages 中所有 role 为 system/developer 的消息；
 //   - 在 messages 头部插入一条 {"role":"system","content":systemPrompt}；

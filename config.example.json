@@ -94,7 +94,9 @@
   },
   "prompt": {
     "mode": "passthrough",
-    "file": ""
+    "file": "",
+    "degrade_enabled": true,
+    "degraded_file": ""
   },
   "upstash": {
     "url": "",

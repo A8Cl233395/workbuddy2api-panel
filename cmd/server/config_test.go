@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/misakano7545/workbuddy2api-panel/internal/prompt"
 )
 
 func TestDefault(t *testing.T) {
@@ -796,6 +798,7 @@ func TestBalanceRefreshDefaults(t *testing.T) {
 
 // TestPromptDefaultPassthrough 默认 prompt.mode=passthrough（对齐上游：透传客户端
 // 原始 system 是更保守的缺省）；custom 由用户显式选择，此时 PromptText 为内置默认（非空）。
+// 降级重试缺省开启（degrade_enabled=true），存量配置零影响。
 func TestPromptDefaultPassthrough(t *testing.T) {
 	c, err := Load("")
 	if err != nil {
@@ -805,6 +808,12 @@ func TestPromptDefaultPassthrough(t *testing.T) {
 		t.Errorf("prompt.mode=%q want passthrough", c.Prompt.Mode)
 	}
 	// passthrough 不加载提示词文本（透传客户端 system）；切 custom 时 normalize 会加载。
+	if !c.Prompt.DegradeEnabled {
+		t.Error("prompt.degrade_enabled 默认应为 true（保持既有降级行为）")
+	}
+	if c.DegradedText != prompt.Degraded {
+		t.Errorf("DegradedText=%q want 内置中性提示词", c.DegradedText)
+	}
 }
 
 // TestPromptExplicitPassthrough passthrough 模式不加载文本（透传客户端原始 system）。
@@ -875,6 +884,79 @@ func TestPromptEnvOverride(t *testing.T) {
 	}
 	if c.Prompt.Mode != "passthrough" {
 		t.Errorf("mode=%q want passthrough", c.Prompt.Mode)
+	}
+}
+
+// TestPromptDegradeEnabledConfig 显式 false 才关闭降级重试；键缺席保持默认 true。
+func TestPromptDegradeEnabledConfig(t *testing.T) {
+	dir := t.TempDir()
+	cf := filepath.Join(dir, "c.json")
+	os.WriteFile(cf, []byte(`{"prompt":{"degrade_enabled":false}}`), 0o600)
+	c, err := Load(cf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Prompt.DegradeEnabled {
+		t.Error("prompt.degrade_enabled=false 未生效")
+	}
+
+	// 键缺席 = 默认 true（存量配置零影响）。
+	legacy := filepath.Join(dir, "legacy.json")
+	os.WriteFile(legacy, []byte(`{"listen":":9999"}`), 0o600)
+	c2, err := Load(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c2.Prompt.DegradeEnabled {
+		t.Error("缺省 prompt.degrade_enabled 应为 true")
+	}
+}
+
+// TestPromptDegradeEnabledEnvOverride WB2A_PROMPT_DEGRADE_ENABLED 覆盖文件值。
+func TestPromptDegradeEnabledEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_PROMPT_DEGRADE_ENABLED", "false")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Prompt.DegradeEnabled {
+		t.Error("WB2A_PROMPT_DEGRADE_ENABLED=false 未生效")
+	}
+}
+
+// TestPromptDegradedFile 自定义降级提示词：空路径 = 内置中性句；路径非空但不可读
+// → 启动报错（fail fast，不静默回落）。
+func TestPromptDegradedFile(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DegradedText != prompt.Degraded {
+		t.Errorf("空 degraded_file 应回落内置中性提示词，got %q", c.DegradedText)
+	}
+
+	dir := t.TempDir()
+	cf := filepath.Join(dir, "bad.json")
+	os.WriteFile(cf, []byte(`{"prompt":{"degraded_file":"/nonexistent/degraded.md"}}`), 0o600)
+	if _, err := Load(cf); err == nil {
+		t.Fatal("degraded_file 不可读时应 fail fast")
+	}
+
+	pf := filepath.Join(dir, "degraded.md")
+	const want = "自定义降级中性提示词"
+	os.WriteFile(pf, []byte(want), 0o600)
+	good := filepath.Join(dir, "good.json")
+	cfgJSON, err := json.Marshal(map[string]any{"prompt": map[string]any{"degraded_file": pf}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(good, cfgJSON, 0o600)
+	c2, err := Load(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.DegradedText != want {
+		t.Errorf("DegradedText=%q want %q", c2.DegradedText, want)
 	}
 }
 
