@@ -457,6 +457,10 @@ func TestChatSyncEmptyUpstreamBodyIs502(t *testing.T) {
 
 func TestChatStreamPassthrough(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		// fake 上游零延迟时首帧与计时起点可能落在同一时钟 tick，TTFB=0 会让
+		// tokensPerSecond 判定「生成时长不可测」而返回 nil（本机 Windows 上稳定复现，
+		// Linux CI 偶发）。加 2ms 让 TTFB 可观测，断言的是流式透传而不是计时器精度。
+		time.Sleep(2 * time.Millisecond)
 		return 200, sseOK, true
 	})
 	h := NewHandler(Config{
