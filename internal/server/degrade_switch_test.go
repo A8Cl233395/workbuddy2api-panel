@@ -264,6 +264,48 @@ func TestPromptDegradeCustomModeUnaffected(t *testing.T) {
 	}
 }
 
+// TestPromptDegradeDisabledKeepsClaudeCodeSystem 验收场景：带 Claude Code 风格
+// system 指纹的请求在关闭开关后被上游拦截时，出站 system 仍是客户端原文，客户端
+// 收到上游原始错误，且不会因为「重试成功」而静默换成中性提示词。
+func TestPromptDegradeDisabledKeepsClaudeCodeSystem(t *testing.T) {
+	const (
+		claudeSys   = "You are Claude Code, Anthropic's official CLI tool for Claude."
+		upstreamErr = `{"code":11-128,"msg":"blocked by security policy"}`
+	)
+	var bodies [][]byte
+	up := captureChatUpstream(&bodies, func(int) (int, string) { return 400, upstreamErr })
+	up.SanitizeFingerprints.Store(false) // 隔离脱敏层，只看降级开关的行为
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{
+		Pool:                 p,
+		Upstream:             up,
+		PromptMode:           "passthrough",
+		DisablePromptDegrade: true,
+	})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":`+fmt.Sprintf("%q", claudeSys)+`},{"role":"user","content":"hi"}]}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d want 400; body=%s", rec.Code, rec.Body)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("want 1 upstream call, got %d", len(bodies))
+	}
+	if got := outboundSystemContents(t, bodies[0]); !reflect.DeepEqual(got, []string{claudeSys}) {
+		t.Errorf("outbound system = %q, want client original %q", got, claudeSys)
+	}
+	if strings.Contains(string(bodies[0]), prompt.Degraded) {
+		t.Errorf("disabled request must not use degraded prompt: %s", bodies[0])
+	}
+	if !strings.Contains(rec.Body.String(), "blocked by security policy") {
+		t.Errorf("client should receive upstream original error: %s", rec.Body)
+	}
+	if h.degrade.Active() {
+		t.Error("degrade window must not be triggered when switch is off")
+	}
+}
+
 // TestPromptDegradeCustomPromptText 自定义降级提示词（prompt.degraded_file 解析结果）
 // 在降级路径中替换内置中性句。
 func TestPromptDegradeCustomPromptText(t *testing.T) {
